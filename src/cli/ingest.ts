@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /** CLI: `npm run ingest -- [options]` */
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { ingest } from '../ingest.ts';
+import { vaultAdapters } from '../sources/vault.ts';
 import type { SourceId } from '../types.ts';
 
-interface Opts { dataDir: string; sources: SourceId[]; limit?: number; noVault: boolean; force: boolean; strategy: 'full-copy' | 'incremental-append'; }
+interface Opts { dataDir: string; sources: SourceId[]; limit?: number; noVault: boolean; force: boolean; fromVault: boolean; strategy: 'full-copy' | 'incremental-append'; }
+
+const USAGE = 'usage: npm run ingest -- [--data-dir DIR] [--sources codex,claude-code,dsh] [--limit N] [--no-vault] [--force] [--from-vault] [--copy-strategy full-copy|incremental-append]';
 
 function parseArgs(argv: string[]): Opts {
   const o: Opts = {
     dataDir: './data', sources: ['codex', 'claude-code', 'dsh'],
-    noVault: false, force: false, strategy: 'full-copy',
+    noVault: false, force: false, fromVault: false, strategy: 'full-copy',
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -18,9 +22,14 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--limit') o.limit = Number(argv[++i]);
     else if (a === '--no-vault') o.noVault = true;
     else if (a === '--force') o.force = true;
+    else if (a === '--from-vault') o.fromVault = true;
     else if (a === '--copy-strategy') o.strategy = argv[++i] as Opts['strategy'];
     else if (a === '--help' || a === '-h') {
-      console.log('usage: npm run ingest -- [--data-dir DIR] [--sources codex,claude-code,dsh] [--limit N] [--no-vault] [--force] [--copy-strategy full-copy|incremental-append]');
+      console.log(USAGE);
+      console.log('\n  --from-vault  re-derive the store from the vault alone (data/vault), never');
+      console.log('                touching ~/.codex, ~/.claude or ~/.dsh. This is how the');
+      console.log('                disposable derived layer is rebuilt after the owning CLI has');
+      console.log('                rotated its own logs away.');
       process.exit(0);
     }
   }
@@ -57,32 +66,55 @@ console.log('trajview ingest');
 console.log('  data-dir: ' + opts.dataDir);
 console.log('  sources : ' + opts.sources.join(', '));
 
-const roots = [home + '/.codex', home + '/.claude', home + '/.dsh'];
-console.log('fingerprinting sources (read-only assertion)...');
-const before = await fingerprint(roots);
+const vaultRoot = path.join(opts.dataDir, 'vault');
 
-const report = await ingest({
-  dataDir: opts.dataDir,
-  sources: opts.sources,
-  limitPerSource: opts.limit,
-  noVault: opts.noVault,
-  copyStrategy: opts.strategy,
-  force: opts.force,
-  onProgress: (m) => console.log(m),
-});
+if (opts.fromVault) {
+  // Replaying the vault reads nothing outside the data dir, so there is no source tree to
+  // fingerprint — the read-only guarantee holds trivially, and by construction.
+  console.log('  mode    : replay from vault (' + vaultRoot + ')');
+  const report = await ingest({
+    dataDir: opts.dataDir,
+    sources: opts.sources,
+    limitPerSource: opts.limit,
+    adapters: vaultAdapters(vaultRoot),
+    // The vault is the input here; re-copying it onto itself would be a no-op.
+    noVault: true,
+    force: opts.force,
+    onProgress: (m) => console.log(m),
+  });
+  console.log('\nresult:');
+  console.log('  elapsed        : ' + report.elapsedMs + 'ms');
+  console.log('  records/source : ' + JSON.stringify(report.records));
+  console.log('  errors         : ' + report.errors.length);
+  for (const e of report.errors.slice(0, 10)) console.log('    - ' + e.source + '/' + e.sessionId + ': ' + e.message);
+} else {
+  const roots = [home + '/.codex', home + '/.claude', home + '/.dsh'];
+  console.log('fingerprinting sources (read-only assertion)...');
+  const before = await fingerprint(roots);
 
-const after = await fingerprint(roots);
-console.log('\nresult:');
-console.log('  elapsed        : ' + report.elapsedMs + 'ms');
-console.log('  records/source : ' + JSON.stringify(report.records));
-console.log('  dsh refusals   : ' + report.refusals.length + (report.refusals.length ? ' (unknown non-ignorable event types)' : ''));
-console.log('  errors         : ' + report.errors.length);
-for (const e of report.errors.slice(0, 10)) console.log('    - ' + e.source + '/' + e.sessionId + ': ' + e.message);
+  const report = await ingest({
+    dataDir: opts.dataDir,
+    sources: opts.sources,
+    limitPerSource: opts.limit,
+    noVault: opts.noVault,
+    copyStrategy: opts.strategy,
+    force: opts.force,
+    onProgress: (m) => console.log(m),
+  });
 
-// A live Codex/Claude session appends to its own log WHILE we read it, so a whole-tree
-// fingerprint always moves. That makes this signal informational only. The deterministic
-// read-only proof is tests/readonly.test.ts, which ingests frozen fixtures and compares
-// their bytes before/after.
-console.log('\nsource-tree fingerprint: ' + (before === after ? 'unchanged' : 'changed'));
-console.log('  (informational: a live agent appends to its own log during this run)');
-console.log('  deterministic read-only proof: npm test -- readonly');
+  const after = await fingerprint(roots);
+  console.log('\nresult:');
+  console.log('  elapsed        : ' + report.elapsedMs + 'ms');
+  console.log('  records/source : ' + JSON.stringify(report.records));
+  console.log('  dsh refusals   : ' + report.refusals.length + (report.refusals.length ? ' (unknown non-ignorable event types)' : ''));
+  console.log('  errors         : ' + report.errors.length);
+  for (const e of report.errors.slice(0, 10)) console.log('    - ' + e.source + '/' + e.sessionId + ': ' + e.message);
+
+  // A live Codex/Claude session appends to its own log WHILE we read it, so a whole-tree
+  // fingerprint always moves. That makes this signal informational only. The deterministic
+  // read-only proof is tests/readonly.test.ts, which ingests frozen fixtures and compares
+  // their bytes before/after.
+  console.log('\nsource-tree fingerprint: ' + (before === after ? 'unchanged' : 'changed'));
+  console.log('  (informational: a live agent appends to its own log during this run)');
+  console.log('  deterministic read-only proof: npm test -- readonly');
+}

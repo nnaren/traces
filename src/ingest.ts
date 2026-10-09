@@ -25,6 +25,8 @@ export interface IngestOptions {
   noVault?: boolean;
   /** Re-normalize even when the source has not changed (e.g. normalizer was fixed). */
   force?: boolean;
+  /** Adapter override; defaults to the three real sources. Injected by tests. */
+  adapters?: TrajectorySourceAdapter[];
   onProgress?: (msg: string) => void;
 }
 
@@ -59,7 +61,7 @@ export async function ingest(opts: IngestOptions): Promise<IngestReport> {
   const vault = new Vault(opts.dataDir + '/vault', opts.copyStrategy ?? 'full-copy');
 
   try {
-    for (const adapter of ADAPTERS) {
+    for (const adapter of (opts.adapters ?? ADAPTERS)) {
       if (!wanted.has(adapter.id)) continue;
       report.discovered[adapter.id] = 0;
       report.ingested[adapter.id] = 0;
@@ -68,6 +70,10 @@ export async function ingest(opts: IngestOptions): Promise<IngestReport> {
       report.superseded[adapter.id] = 0;
 
       let n = 0;
+      // sessionIds already accepted during THIS run. Only these are duplicate discoveries
+      // competing with each other; a row left behind by an earlier run is not a duplicate,
+      // it is the previous parse, which a re-ingest is meant to replace.
+      const accepted = new Set<string>();
       for await (const ref of adapter.discover()) {
         report.discovered[adapter.id]++;
         if (opts.limitPerSource && n >= opts.limitPerSource) break;
@@ -85,6 +91,28 @@ export async function ingest(opts: IngestOptions): Promise<IngestReport> {
           const lines = await adapter.readAll(ref);
           const relevant = lines.filter((l) => adapter.isRelevant(l));
 
+          const session: NormSession = normalizeFor(adapter, ref, relevant, report.refusals);
+
+          // The same session can be discovered twice (Codex: sessions/ vs archived_sessions/).
+          // Keep whichever copy actually holds more trajectory rather than letting the
+          // last one seen overwrite a richer file.
+          //
+          // Scope matters here, and getting it wrong is silent:
+          //  - Two discoveries of one sessionId WITHIN this run are duplicates: the richer
+          //    copy must win, or the last-seen (possibly archived, possibly truncated) copy
+          //    overwrites the trajectory.
+          //  - A row from a PREVIOUS run is not a duplicate. --force exists precisely to
+          //    replace it, even when a parser fix legitimately shrinks the session.
+          //
+          // This decision MUST happen before the vault write: the vault is the immutable
+          // raw archive — it exists because the owning CLI rotates and deletes its own
+          // logs — so a copy we are about to reject must never land in it.
+          const prior = store.getSession(ref.source, ref.sessionId);
+          if (accepted.has(ref.sessionId) && prior && Number(prior.record_count) > session.records.length) {
+            report.superseded[adapter.id] = (report.superseded[adapter.id] ?? 0) + 1;
+            continue;
+          }
+
           let vaultPath = ref.path;
           if (!opts.noVault) {
             const raw = await fs.readFile(ref.path);
@@ -93,18 +121,8 @@ export async function ingest(opts: IngestOptions): Promise<IngestReport> {
             void meta;
           }
 
-          const session: NormSession = normalizeFor(adapter, ref, relevant, report.refusals);
-
-          // The same session can be discovered twice (Codex: sessions/ vs archived_sessions/).
-          // Keep whichever copy actually holds more trajectory rather than letting the
-          // last one seen overwrite a richer file.
-          const prior = store.getSession(ref.source, ref.sessionId);
-          if (prior && Number(prior.record_count) > session.records.length) {
-            report.superseded[adapter.id] = (report.superseded[adapter.id] ?? 0) + 1;
-            continue;
-          }
-
           store.writeSession(session, vaultPath, ref.path);
+          accepted.add(ref.sessionId);
           report.ingested[adapter.id]++;
           report.records[adapter.id] += session.records.length;
         } catch (err) {

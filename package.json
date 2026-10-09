@@ -13,7 +13,8 @@
     "dev:web": "vite",
     "build:web": "vite build",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "audit:vault": "tsx scripts/audit-vault-dupes.ts"
   },
   "dependencies": {
     "react": "^18.3.1",

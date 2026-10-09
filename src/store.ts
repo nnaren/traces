@@ -1,6 +1,8 @@
 /**
- * Derived store (PRD §6.4). Everything here is DISPOSABLE: deleting traces.sqlite3
- * and blobs/ and re-running ingest reproduces it byte-for-byte from the vault.
+ * Derived store (PRD §6.4). Everything here is DISPOSABLE: `rm traces.sqlite3 blobs/` plus
+ * `npm run ingest -- --from-vault` reproduces it from the vault alone — byte-identical
+ * rows, blobs and FTS index — WITHOUT reading the source tree, so it still works after
+ * the owning CLI has rotated its own logs away (P6).
  *
  * Thin common spine + per-source detail tables, so a source adding a field never
  * migrates the spine. Uses node:sqlite (zero native dependency).
@@ -15,6 +17,8 @@ import type { NormRecord, NormSession, NormStep, NormTurn, SourceId } from './ty
 const APPLICATION_ID = 0x5452414a; // 'TRAJ'
 const SCHEMA_VERSION = 2;
 const BLOB_THRESHOLD = 16 * 1024;
+/** Distinct blobs remembered per Store, to skip rewriting an identical payload. */
+const BLOB_CACHE_MAX = 4096;
 
 export class Store {
   private db: DatabaseSync;
@@ -142,16 +146,29 @@ export class Store {
     `);
   }
 
-  private putBlob(text: string): string {
-    const cached = this.blobCache.get(text);
-    if (cached) return cached;
+  /**
+   * Content-address a payload under blobs/. Returns null when the blob could NOT be
+   * written (read-only data dir, full disk, a directory squatting the content-addressed
+   * path) so the caller can keep it inline.
+   *
+   * A digest we cannot read back is worse than no digest at all: the row would claim a
+   * payload exists, recordDetail() would return undefined, and the raw output would be
+   * unrecoverable from the derived layer. Degrading to inline costs only some row width.
+   */
+  private putBlob(text: string): string | null {
     const digest = createHash('sha256').update(text, 'utf8').digest('hex');
+    const cached = this.blobCache.get(digest);
+    if (cached !== undefined) return cached;
     const dir = path.join(this.blobRoot, digest.slice(0, 2));
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeFileSync(path.join(dir, digest), text, { mode: 0o600 });
-    } catch { /* best effort: fall back to inline */ }
-    this.blobCache.set(text, digest);
+    } catch {
+      return null; // deliberately uncached: the next session may get a different data dir
+    }
+    // Keyed by digest, not by text, so the map does not pin every payload in memory.
+    if (this.blobCache.size >= BLOB_CACHE_MAX) this.blobCache.clear();
+    this.blobCache.set(digest, digest);
     return digest;
   }
 
@@ -208,14 +225,17 @@ export class Store {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const insFts = this.db.prepare('INSERT INTO records_fts (text,session_id,source,record_id) VALUES (?,?,?,?)');
       for (const r of s.records) {
-        const big = (r.detailText ?? '').length > BLOB_THRESHOLD;
-        const blob = big ? this.putBlob(r.detailText!) : null;
+        const detail = r.detailText ?? null;
+        // Threshold is measured in BYTES (the README states 16 KiB); the blob may still
+        // fail to land, in which case putBlob returns null and we keep the payload inline.
+        const blob = detail !== null && Buffer.byteLength(detail, 'utf8') > BLOB_THRESHOLD
+          ? this.putBlob(detail) : null;
         insRec.run(...nums([
           s.source, s.sessionId, r.recordId, r.orderIndex, r.kind, r.turnIndex, r.stepIndex,
           r.sourceSeq != null ? String(r.sourceSeq) : null, r.startedAt, r.timeSeconds,
           r.toolName ?? null, r.callId ?? null, r.isError ? 1 : 0,
           r.usage ? JSON.stringify(r.usage) : null, JSON.stringify(r.flags), r.text,
-          big ? null : (r.detailText ?? null), blob,
+          blob ? null : detail, blob,
         ]));
         const searchable = [r.text, r.toolName, r.detailText].filter(Boolean).join('\n').slice(0, 4000);
         if (searchable.trim()) insFts.run(searchable, s.sessionId, s.source, r.recordId);

@@ -3,10 +3,30 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { Store } from '../src/store.ts';
 import { Vault } from '../src/vault.ts';
+import { ingest } from '../src/ingest.ts';
+import { vaultAdapters } from '../src/sources/vault.ts';
 import { normalizeCodex } from '../src/normalize/codex.ts';
 import { splitLines } from '../src/sources/stableRead.ts';
-import type { SessionRef } from '../src/types.ts';
+import type { SessionRef, TrajectorySourceAdapter } from '../src/types.ts';
 import { cleanup, tempDir } from './helpers.ts';
+
+/** A real adapter over an explicit file list, so ingest() can be driven from fixtures. */
+function fixtureAdapter(refs: SessionRef[]): TrajectorySourceAdapter {
+  return {
+    id: 'codex',
+    capabilities: normalizeCodex(refs[0] ?? ({ source: 'codex', sessionId: 'x', path: '/x' } as SessionRef), []).capabilities,
+    async *discover() {
+      for (const r of refs) {
+        try { await fs.access(r.path); } catch { continue; }   // a deleted source is gone
+        yield r;
+      }
+    },
+    async readAll(ref) {
+      return splitLines(Buffer.from(await fs.readFile(ref.path, 'utf8'), 'utf8'));
+    },
+    isRelevant: () => true,
+  };
+}
 
 const dir = await tempDir('store');
 afterAll(() => cleanup(dir));
@@ -48,19 +68,48 @@ describe('derived store', () => {
     s.close();
   });
 
-  it('can be deleted and rebuilt from the vault to an identical result (P6)', async () => {
-    const s0 = await Store.open(dir);
-    const before = s0.getPage('codex', 's1', undefined, 999).map((r: any) => [r.order_index, r.kind, r.summary]);
+  // P6 — this used to re-normalize a fixture and call that "from the vault". It now
+  // deletes the source file outright and replays through the real vault adapters, which is
+  // the only version of this claim worth asserting.
+  it('rebuilds the derived layer from the vault alone after the source is gone (P6)', async () => {
+    const pdir = path.join(dir, 'p6');
+    const src = path.join(pdir, 'rollout-p6.jsonl');
+    const lineBody = lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+    await fs.mkdir(pdir, { recursive: true });
+    await fs.writeFile(src, lineBody);
+
+    const adapters = [fixtureAdapter([{ source: 'codex', sessionId: 'p6', path: src, revision: 'r1' }])];
+    const first = await ingest({ dataDir: pdir, adapters });
+    expect(first.errors).toEqual([]);
+    expect(first.ingested.codex).toBe(1);
+
+    const s0 = await Store.open(pdir);
+    const before = s0.getPage('codex', 'p6', undefined, 999)
+      .map((r: any) => [r.order_index, r.kind, r.summary, r.started_at, r.detail_text]);
     s0.close();
+    expect(before.length).toBeGreaterThan(0);
 
-    // Delete ONLY the derived layer; the vault stays.
-    await fs.rm(path.join(dir, 'traces.sqlite3'), { force: true });
-    for (const suffix of ['-wal', '-shm']) await fs.rm(path.join(dir, 'traces.sqlite3' + suffix), { force: true });
+    // The owning CLI rotates its own logs away.
+    await fs.rm(src, { force: true });
 
-    const s1 = await Store.open(dir);
-    expect(s1.countSessions().codex).toBe(0);           // derived data is gone
-    s1.writeSession(session(), '/vault/s1.jsonl', '/fake/s1.jsonl');
-    const after = s1.getPage('codex', 's1', undefined, 999).map((r: any) => [r.order_index, r.kind, r.summary]);
+    // Delete ONLY the derived layer. The vault survives — that is the whole point of it.
+    for (const suffix of ['', '-wal', '-shm']) {
+      await fs.rm(path.join(pdir, 'traces.sqlite3' + suffix), { force: true });
+    }
+    await fs.rm(path.join(pdir, 'blobs'), { recursive: true, force: true });
+
+    // Rebuild from the vault, with no source tree left to read.
+    const replay = await ingest({
+      dataDir: pdir,
+      adapters: vaultAdapters(path.join(pdir, 'vault')),
+      noVault: true,
+    });
+    expect(replay.errors).toEqual([]);
+    expect(replay.ingested.codex).toBe(1);
+
+    const s1 = await Store.open(pdir);
+    const after = s1.getPage('codex', 'p6', undefined, 999)
+      .map((r: any) => [r.order_index, r.kind, r.summary, r.started_at, r.detail_text]);
     s1.close();
     expect(after).toEqual(before);
   });

@@ -4,6 +4,7 @@
 用同一套界面显示 **DeepSeek Harness / Codex CLI / Claude Code** 三源轨迹。
 
 ![ledger](docs/screenshot-session.png)
+![inspector on the right](docs/screenshot-sidebar.png)
 
 ---
 
@@ -69,8 +70,12 @@ data/
 > 每次按源查询的额外 join。详见 `src/store.ts` 的 `migrate()` 注释。
 
 ```bash
-rm -rf data/traces.sqlite3 data/blobs && npm run ingest   # 幂等重建
+# 派生层可随时丢弃，从 vault 重建（不读 ~/.codex ~/.claude ~/.dsh）
+rm -rf data/traces.sqlite3 data/blobs && npm run ingest -- --from-vault
 ```
+
+`--from-vault` 是 vault 兑现价值的那条路径：拥有源日志的 CLI 会自行轮转删除，vault 里
+保存的原始字节仍能重新归一化回派生层。会话源目录已消失时，它是唯一还能重建轨迹的方式。
 
 摄入时会跳过来源未变化的会话；改了解析器后用 `--force` 强制重建派生层。
 
@@ -85,7 +90,7 @@ rm -rf data/traces.sqlite3 data/blobs && npm run ingest   # 幂等重建
 | `npm test` | Vitest 全量测试 |
 | `npm run typecheck` | `tsc --noEmit` |
 
-`ingest` 参数：`--data-dir` `--sources codex,claude-code,dsh` `--limit N` `--no-vault` `--force` `--copy-strategy full-copy|incremental-append`
+`ingest` 参数：`--data-dir` `--sources codex,claude-code,dsh` `--limit N` `--no-vault` `--force` `--from-vault` `--copy-strategy full-copy|incremental-append`
 
 ## 抗撕裂读取
 

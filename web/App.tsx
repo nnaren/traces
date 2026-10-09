@@ -129,8 +129,10 @@ export function App() {
               </div>
             </header>
             <Timeline source={sel.source} sessionId={sel.sessionId} />
-            <Ledger session={sel} selected={selectedRecord} onSelect={setSelectedRecord} />
-            <Inspector session={sel} recordId={selectedRecord} />
+            <div className="body-row">
+              <Ledger session={sel} selected={selectedRecord} onSelect={setSelectedRecord} />
+              <Inspector session={sel} recordId={selectedRecord} />
+            </div>
           </>
         )}
       </main>
