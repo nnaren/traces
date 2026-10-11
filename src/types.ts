@@ -50,6 +50,19 @@ export interface SessionRef {
   byteSize?: number;
   /** [dev,ino,size,mtimeMs,ctimeMs] of the source at discovery time. */
   revision?: string;
+  /**
+   * Codex subagents: the spawning thread's id.
+   *
+   * Codex writes EVERY rollout's `session_meta.payload.session_id` as the ROOT
+   * conversation, so a subagent's own identity lives in `payload.id`. Keying on
+   * `session_id` collapsed all 64 subagent rollouts on this machine into their parent and
+   * discarded them as duplicates.
+   */
+  parentSessionId?: string;
+  /** Codex subagents: the spawn-assigned name (e.g. "Aristotle"). */
+  agentNickname?: string;
+  /** Codex subagents: spawn depth; 1 = spawned by the root conversation. */
+  subagentDepth?: number;
 }
 
 export interface TrajectorySourceAdapter {
@@ -173,6 +186,12 @@ export interface NormSession {
   cwd?: string;
   gitBranch?: string;
   cliVersion?: string;
+  /** Codex subagents: the conversation that spawned this one (see SessionRef). */
+  parentSessionId?: string;
+  /** Codex subagents: the spawn-assigned name, e.g. "Aristotle". */
+  agentNickname?: string;
+  /** Codex subagents: spawn depth; 1 = spawned by the root conversation. */
+  subagentDepth?: number;
   /** R1: EFFECTIVE ordering for this session, resolved at ingest. */
   capabilities: SourceCapabilities;
   startedAt?: number;

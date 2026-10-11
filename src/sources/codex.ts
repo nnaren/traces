@@ -93,9 +93,19 @@ export const codexAdapter: TrajectorySourceAdapter = {
         }
         if (first?.type !== 'session_meta') continue;
         const st = await fs.stat(p).catch(() => undefined);
+        // `payload.id` is this rollout's OWN thread id; `payload.session_id` is the ROOT
+        // conversation. For a normal session the two are identical (113/113 measured on
+        // this machine), but a subagent rollout carries its PARENT in `session_id`
+        // (64/64 measured). Keying on `session_id` therefore gave every subagent its
+        // parent's identity, so they collided and were dropped as duplicates — 36% of all
+        // trajectories were invisible. `id` is present in every rollout, so prefer it.
+        const spawn = first.payload?.source?.subagent?.thread_spawn;
         yield {
           source: 'codex',
-          sessionId: first.payload?.session_id ?? path.basename(p),
+          sessionId: first.payload?.id ?? first.payload?.session_id ?? path.basename(p),
+          parentSessionId: first.payload?.parent_thread_id ?? spawn?.parent_thread_id,
+          agentNickname: first.payload?.agent_nickname ?? spawn?.agent_nickname ?? undefined,
+          subagentDepth: typeof spawn?.depth === 'number' ? spawn.depth : undefined,
           path: p,
           cwd: first.payload?.cwd,
           cliVersion: first.payload?.cli_version,

@@ -400,6 +400,8 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
 
   records.sort((a, b) => a.orderIndex - b.orderIndex);
   return { source: 'codex', sessionId: ref.sessionId, cwd, cliVersion, capabilities,
+    parentSessionId: ref.parentSessionId, agentNickname: ref.agentNickname,
+    subagentDepth: ref.subagentDepth,
     startedAt, endedAt, turns, steps, records, diagnostics: diag };
 }
 

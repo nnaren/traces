@@ -11,6 +11,8 @@ export interface Capabilities {
 
 export interface SessionRow {
   source: SourceId; sessionId: string; cwd?: string; gitBranch?: string; cliVersion?: string;
+  /** Codex subagents: the spawning conversation, its spawn nickname, and the spawn depth. */
+  parentSessionId?: string | null; agentNickname?: string | null; subagentDepth?: number | null;
   startedAt?: number; endedAt?: number;
   capabilities: Capabilities;
   diagnostics: Record<string, any>;

@@ -15,7 +15,7 @@ import path from 'node:path';
 import type { NormRecord, NormSession, NormStep, NormTurn, SourceId } from './types.ts';
 
 const APPLICATION_ID = 0x5452414a; // 'TRAJ'
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const BLOB_THRESHOLD = 16 * 1024;
 /** Distinct blobs remembered per Store, to skip rewriting an identical payload. */
 const BLOB_CACHE_MAX = 4096;
@@ -103,6 +103,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS sessions (
         source TEXT NOT NULL, session_id TEXT NOT NULL,
         vault_path TEXT, source_path TEXT, cwd TEXT, git_branch TEXT, cli_version TEXT,
+        -- Codex subagents: the spawning conversation, its nickname and the spawn depth.
+        parent_session_id TEXT, agent_nickname TEXT, subagent_depth INTEGER,
         started_at INTEGER, ended_at INTEGER, first_seen_at INTEGER NOT NULL, last_ingested_at INTEGER NOT NULL,
         capabilities_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL DEFAULT '{}',
         record_count INTEGER DEFAULT 0, turn_count INTEGER DEFAULT 0, step_count INTEGER DEFAULT 0,
@@ -203,16 +205,20 @@ export class Store {
       this.db.prepare('DELETE FROM records_fts WHERE session_id=? AND source=?').run(s.sessionId, s.source);
       this.db.prepare(`
         INSERT INTO sessions (source, session_id, vault_path, source_path, cwd, git_branch, cli_version,
+          parent_session_id, agent_nickname, subagent_depth,
           started_at, ended_at, first_seen_at, last_ingested_at, capabilities_json, diagnostics_json,
           record_count, turn_count, step_count)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(source, session_id) DO UPDATE SET
           vault_path=excluded.vault_path, source_path=excluded.source_path, cwd=excluded.cwd,
-          git_branch=excluded.git_branch, cli_version=excluded.cli_version, started_at=excluded.started_at,
+          git_branch=excluded.git_branch, cli_version=excluded.cli_version,
+          parent_session_id=excluded.parent_session_id, agent_nickname=excluded.agent_nickname,
+          subagent_depth=excluded.subagent_depth, started_at=excluded.started_at,
           ended_at=excluded.ended_at, last_ingested_at=excluded.last_ingested_at,
           capabilities_json=excluded.capabilities_json, diagnostics_json=excluded.diagnostics_json,
           record_count=excluded.record_count, turn_count=excluded.turn_count, step_count=excluded.step_count
       `).run(s.source, s.sessionId, vaultPath, sourcePath, s.cwd ?? null, s.gitBranch ?? null, s.cliVersion ?? null,
+        s.parentSessionId ?? null, s.agentNickname ?? null, s.subagentDepth ?? null,
         s.startedAt ?? null, s.endedAt ?? null, now, now, JSON.stringify(s.capabilities),
         JSON.stringify(s.diagnostics), s.records.length, s.turns.length, s.steps.length);
 

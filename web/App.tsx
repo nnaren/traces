@@ -259,6 +259,14 @@ export function App() {
                 <span className={'pill ' + s.source}>{srcLabel(s.source)}</span>
                 <span className="s-time">{fmtTime(s.startedAt)}</span>
               </div>
+              {/* A Codex subagent rollout carries its PARENT in session_meta.session_id, so
+                  without this badge it is indistinguishable from a root conversation. */}
+              {s.parentSessionId && (
+                <div className="s-sub" title={'由会话 ' + s.parentSessionId + ' 派生'}>
+                  子 agent{s.agentNickname ? ' · ' + s.agentNickname : ''}
+                  {s.subagentDepth != null ? ' · 深度 ' + s.subagentDepth : ''}
+                </div>
+              )}
               <div className="s-id" title={s.sessionId}>{s.sessionId}</div>
               <div className="s-path" title={s.cwd}>{s.cwd ?? '—'}</div>
               <div className="s-stats">

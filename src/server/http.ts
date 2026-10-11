@@ -234,7 +234,12 @@ function withStepAnchors(steps: any[], rows: any[]): any[] {
 function shapeSession(r: any) {
   return {
     source: r.source, sessionId: r.session_id, cwd: r.cwd, gitBranch: r.git_branch,
-    cliVersion: r.cli_version, startedAt: r.started_at, endedAt: r.ended_at,
+    cliVersion: r.cli_version,
+    // Codex subagents: the conversation that spawned this one, for linking the two.
+    parentSessionId: r.parent_session_id ?? null,
+    agentNickname: r.agent_nickname ?? null,
+    subagentDepth: r.subagent_depth ?? null,
+    startedAt: r.started_at, endedAt: r.ended_at,
     capabilities: safeParse(r.capabilities_json, {}), diagnostics: safeParse(r.diagnostics_json, {}),
     recordCount: r.record_count, turnCount: r.turn_count, stepCount: r.step_count,
   };

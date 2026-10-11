@@ -96,6 +96,10 @@ code,pre,.mono{font-family:var(--mono)}
 .s-id{font-family:var(--mono);font-size:11px;margin:4px 0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .s-path{color:var(--fg3);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)}
 .s-time{color:var(--fg3);font-size:10px}
+/* Codex subagent marker: the session's own rollout, not the root conversation. */
+.s-sub{display:inline-block;margin:2px 0;padding:0 5px;border-radius:3px;font-size:9px;
+  background:color-mix(in srgb,var(--claude) 16%,transparent);color:var(--claude);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .s-stats{display:flex;gap:8px;color:var(--fg3);font-size:10px;margin-top:4px}
 .s-stats .warn{color:var(--warn)}
 
