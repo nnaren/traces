@@ -54,6 +54,30 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
   let costUsd: number | undefined;
   const turnUsage = new Map<number, NormUsage>();
 
+  /**
+   * Claude Code splits ONE API response across consecutive `assistant` lines: a line
+   * carrying the thinking/text blocks, then a line carrying the tool_use blocks. They are
+   * one model call, not two — measured on this machine's logs:
+   *
+   *   message.id  identical        (06ec85c9… on both lines)
+   *   usage       byte-identical   (same input/output/cache counters)
+   *   stop_reason identical        (tool_use)
+   *   parentUuid of line N+1 == uuid of line N
+   *
+   * Treating them as separate model calls gave each its own `stepIndex`, which split one
+   * assistant turn into a "助手（无内容）" row plus an orphan "助手 Write{…}" row. The
+   * ledger's fold can only join a tool to a message in the SAME step, so the two halves
+   * could never be brought back together. Keyed here so both lines share one step and one
+   * message row (and so the shared `usage` is only counted once).
+   */
+  let lastAsstMsgId: string | undefined;
+  let curRec: NormRecord | undefined;
+  /** Whether `curRec.detailText` is real assistant OUTPUT (vs a reasoning/placeholder
+   *  summary). Only real output may be appended to; a placeholder must be REPLACED, so
+   *  reasoning can never leak into the 输出 tab. */
+  let curRecHasText = false;
+  let curSubOrder = 0;
+
   const openTurn = (ts?: number) => {
     currentTurn = turns.length;
     turns.push({ turnIndex: currentTurn, boundaryConfidence: 'derived', startedAt: ts,
@@ -123,46 +147,87 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
 
     if (type === 'assistant') {
       const t = ensureTurn(ts);
-      const stepIndex = steps.length;
-      steps.push({ stepIndex, turnIndex: t, boundaryConfidence: 'derived', startedAt: ts,
-        ttftMs: null, decodeMs: null, model: msg?.model });
+      const msgId = typeof msg?.id === 'string' ? msg.id : undefined;
 
-      // Sub-record ordering. One assistant JSONL line yields a message row AND one row
-      // per tool_use block, but they all shared `order` (= the physical line index).
-      // `getOwnedToolCalls` looks for sibling tools in
-      // `(row.order_index, next message.order_index)`, so tools sitting at the SAME
-      // order_index as their owning message fell outside that window and the inspector
-      // reported "该 step 没有工具调用" for every tool-call-only message.
-      // Slot the message at `order` and each tool at a fractional value just above it,
-      // so a sub-record's order_index reflects its position within the source line. The
-      // 0.001 stride can never collide with a real line index (the next line is the
-      // integer `i+1`).
-      let subOrder = order + 0.001;
+      // A second line of the SAME response reuses the previous step instead of opening a
+      // new one (see lastAsstMsgId). Without this the thinking line and the tool_use line
+      // of one model call became two steps, and no fold could ever reunite them.
+      const reuseStep = msgId !== undefined && msgId === lastAsstMsgId && curRec !== undefined;
+      const stepIndex = reuseStep ? curRec!.stepIndex! : steps.length;
+      if (!reuseStep) {
+        steps.push({ stepIndex, turnIndex: t, boundaryConfidence: 'derived', startedAt: ts,
+          ttftMs: null, decodeMs: null, model: msg?.model });
+        lastAsstMsgId = msgId;
+        curRec = undefined;
+        curRecHasText = false;
+        // Sub-record ordering. Assistant sub-records all shared `order` (the physical line
+        // index) and `getOwnedToolCalls` looks for siblings in
+        // `(row.order_index, next message.order_index)`, so tools sitting at the SAME
+        // order_index as their owning message fell outside the window. Slot the message at
+        // the response's first line order and each tool at a fractional value above it.
+        // The 0.001 stride can never collide with a real line index.
+        curSubOrder = order + 0.001;
+      }
 
       let text = '';
+      let thinking = '';
+      let hasToolCall = false;
       for (const b of blocks) {
-        if (b.type === 'thinking') {
-          const text2 = b.thinking ?? '';
-          // Stored on the step, not as a `context` row: thinking is model output and
-          // would otherwise land in the 输入 lane. The inspector reads it from there.
-          if (text2) steps[stepIndex].reasoning = { availability: 'plaintext', text: text2 };
+        if (b.type === 'thinking' || b.type === 'reasoning') {
+          thinking += (b.thinking ?? b.text ?? '') + '\n';
         } else if (b.type === 'text') {
           text += (b.text ?? '') + '\n';
+        } else if (b.type === 'tool_use' || b.type === 'tool-call') {
+          hasToolCall = true;
         }
       }
-      if (text.trim()) {
-        records.push({ recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
-          stepIndex, text: firstLine(text), detailText: text.trim(), timeSeconds: null, startedAt: ts, flags: [] });
-      } else if (blocks.length > 0) {
-        // Tool-call-only assistant turns carry no text block; keep the row so the step
-        // isn't left with bare tool calls and nothing that produced them.
-        const hasToolCall = blocks.some((b: any) => b.type === 'tool_use' || b.type === 'tool-call');
-        records.push({ recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
-          stepIndex, text: hasToolCall ? '（仅工具调用）' : '（无内容）',
-          timeSeconds: null, startedAt: ts, flags: [] });
+      if (thinking.trim()) {
+        // Kept on the step (the inspector reads it from there) AND, when the response has
+        // no assistant text of its own, used as the message row's summary — otherwise a
+        // reasoning-bearing response would render as a contentless "（无内容）" row.
+        steps[stepIndex].reasoning = { availability: 'plaintext', text: thinking.trim() };
       }
 
-      // usage is per-record: sum into the turn aggregate and keep the step copy
+      const body = text.trim();
+      if (curRec) {
+        // A later line of the same response folds into the ONE row already emitted.
+        if (body) {
+          // REPLACE a reasoning/placeholder summary; only APPEND to real output text.
+          // Concatenating here would have put the model's thinking into the 输出 tab.
+          const merged = curRecHasText && curRec.detailText ? curRec.detailText + '\n' + body : body;
+          curRec.kind = 'message';
+          curRec.detailText = merged;
+          curRec.text = firstLine(merged);
+          curRecHasText = true;
+        }
+      } else if (body) {
+        curRec = { recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
+          stepIndex, text: firstLine(body), detailText: body, timeSeconds: null, startedAt: ts, flags: [] };
+        curRecHasText = true;
+        records.push(curRec);
+      } else if (thinking.trim()) {
+        // Reasoning-only response: label it 推理 so the row is never mistaken for model
+        // output, and so it can still own the tool calls that follow in the same response.
+        curRec = { recordId: rid('rsn' + order), kind: 'reasoning', orderIndex: order, turnIndex: t,
+          stepIndex, text: firstLine(thinking), detailText: thinking.trim(),
+          timeSeconds: null, startedAt: ts, flags: [] };
+        records.push(curRec);
+      } else if (hasToolCall) {
+        // Tool-only response. The tool records ARE its content and render as their own 工具
+        // rows, exactly as DSH and Codex do. Emitting a "（仅工具调用）" placeholder here is
+        // what made a single step read as TWO 助手 rows — the assistant row plus a fake one
+        // carrying nothing but the tool call.
+      } else if (blocks.length > 0) {
+        // Unrecognised blocks with no text and no tools: keep a row so the step is not
+        // silently blank rather than dropping whatever the source recorded.
+        curRec = { recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
+          stepIndex, text: '（无内容）', timeSeconds: null, startedAt: ts, flags: [] };
+        records.push(curRec);
+      }
+
+      // usage is per-record: sum into the turn aggregate and keep the step copy.
+      // A split response repeats the SAME usage on every line, so it may only be counted
+      // once — otherwise a turn with a tool call reports double its real token cost.
       const u = msg?.usage;
       if (u) {
         const stepUsage: NormUsage = {
@@ -172,14 +237,16 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
           scope: 'record', cacheSemantics: capabilities.cacheSemantics, crossSourceComparable: false,
         };
         steps[stepIndex].usage = stepUsage;
-        const acc = turnUsage.get(t)!;
-        acc.inputTokens = (acc.inputTokens ?? 0) + (u.input_tokens ?? 0);
-        acc.cachedInputTokens = (acc.cachedInputTokens ?? 0) + (u.cache_read_input_tokens ?? 0);
-        acc.cacheWriteInputTokens = (acc.cacheWriteInputTokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-        acc.outputTokens = (acc.outputTokens ?? 0) + (u.output_tokens ?? 0);
-        acc.reasoningTokens = (acc.reasoningTokens ?? 0) + (u.output_tokens_details?.thinking_tokens ?? 0);
-        acc.totalTokens = (acc.inputTokens ?? 0) + (acc.outputTokens ?? 0);
-      } else {
+        if (!reuseStep) {
+          const acc = turnUsage.get(t)!;
+          acc.inputTokens = (acc.inputTokens ?? 0) + (u.input_tokens ?? 0);
+          acc.cachedInputTokens = (acc.cachedInputTokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+          acc.cacheWriteInputTokens = (acc.cacheWriteInputTokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+          acc.outputTokens = (acc.outputTokens ?? 0) + (u.output_tokens ?? 0);
+          acc.reasoningTokens = (acc.reasoningTokens ?? 0) + (u.output_tokens_details?.thinking_tokens ?? 0);
+          acc.totalTokens = (acc.inputTokens ?? 0) + (acc.outputTokens ?? 0);
+        }
+      } else if (!reuseStep) {
         diag.usageMissingCount++;
       }
 
@@ -187,13 +254,13 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
         if (b.type !== 'tool_use') continue;
         const inputRaw = safeJson(b.input);
         const rec: NormRecord = {
-          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: subOrder, turnIndex: t, stepIndex,
+          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: curSubOrder, turnIndex: t, stepIndex,
           text: b.name + '(' + truncate(inputRaw, 80) + ')', detailText: inputRaw,
           toolName: b.name, callId: b.id, timeSeconds: null, startedAt: ts,
           tool: { callId: b.id, name: b.name, inputRaw, startedAt: ts, durationMs: null, depth: 0 },
           flags: [],
         };
-        subOrder += 0.001;
+        curSubOrder += 0.001;
         records.push(rec);
         toolById.set(b.id, rec);
       }

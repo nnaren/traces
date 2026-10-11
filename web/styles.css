@@ -252,23 +252,8 @@ code,pre,.mono{font-family:var(--mono)}
 .flags{display:flex;gap:2px;flex:none}
 .flags i{font-style:normal;font-size:10px;color:var(--warn)}
 
-/* ---------- ledger: folded tools (Claude Code) ---------- */
-/* A message whose tool_use blocks were folded into its row stacks a chip line under the
-   summary line, so the row is one CHIPS_H taller than the plain 26px rows. */
-.row.has-tools{flex-direction:column;align-items:stretch;gap:0}
+/* ---------- ledger row layout ---------- */
 .row-line{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
-.row.has-tools .row-line{flex:none;height:26px}
-.row-tools{display:flex;align-items:center;gap:6px;flex:1;min-height:0;overflow:hidden}
-.tc-count{flex:none;padding:0 5px;border-radius:99px;font-family:var(--mono);font-size:9px;font-weight:600;
-  background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
-.tc-chip{display:inline-flex;align-items:center;gap:4px;flex:none;max-width:340px;
-  padding:1px 7px;border-radius:4px;font-family:var(--mono);font-size:10px;white-space:nowrap;
-  background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--warn)}
-.tc-chip.err{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err)}
-.tc-chip-ico{font-style:normal;opacity:.75}
-.tc-chip b{font-weight:600}
-.tc-chip-args{overflow:hidden;text-overflow:ellipsis;color:var(--fg2)}
-.tc-chip-dur{flex:none;color:var(--fg3)}
 
 /* ---------- inspector ---------- */
 .inspector{flex:none;width:420px;border-left:1px solid var(--line);background:var(--bg2);overflow:auto;padding:0 18px 16px}
