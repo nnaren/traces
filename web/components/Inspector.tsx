@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api, fmtDur, splitToolLabel, type RecordRow, type SessionRow, type SiblingTool, type StepRow, type TurnRow } from '../lib/api';
 import { Markdown } from './Markdown';
 import { JsonTree } from './JsonTree';
+import { subagentRefs } from '../lib/subagent';
 
 /**
  * Record inspector, following the DSH `ui-trajectory` inspector:
@@ -31,10 +32,14 @@ const stepNo = (idx?: number, id?: string) => id ?? (idx != null ? String(idx + 
 
 type Tab = 'overview' | 'preview' | 'raw' | 'input' | 'output' | 'schema' | 'timing';
 
-export function Inspector({ session, recordId, onSelect, width }: {
+export function Inspector({ session, recordId, onSelect, width, hasSession, onOpenSession }: {
   session: SessionRow; recordId: string | null; onSelect?: (recordId: string) => void;
   /** Pixel width override applied as an inline style. Falls back to the CSS default. */
   width?: number;
+  /** Whether a subagent id resolves to a session we can open; gates the jump link. */
+  hasSession?: (sessionId: string) => boolean;
+  /** Open another session (a subagent's own trajectory) without leaving the app. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const [rec, setRec] = useState<(RecordRow & { siblings?: SiblingTool[] }) | null>(null);
   const [step, setStep] = useState<StepRow | null>(null);
@@ -135,6 +140,12 @@ export function Inspector({ session, recordId, onSelect, width }: {
           </>
         )}
       </div>
+
+      {/* Rendered once, right under the tabs, rather than inside 结果: that section starts
+          COLLAPSED and the 结果 tab is not the default, so a link placed there is invisible
+          exactly when the user needs it. This way a subagent-spawning call always shows its
+          jump link the moment the record opens, on every tab. */}
+      {isTool && <SubagentLinks rec={rec} hasSession={hasSession} onOpenSession={onOpenSession} />}
 
       {tab === 'overview' && (
         <>
@@ -260,6 +271,35 @@ export function Inspector({ session, recordId, onSelect, width }: {
         </>
       )}
     </aside>
+  );
+}
+
+/**
+ * Jump links from a tool call to the subagent conversation it drove.
+ *
+ * A Codex subagent is a session of its own, so the `agent_id` in `spawn_agent`'s result (or
+ * in `wait_agent`'s `targets`) opens directly. Links are only rendered for ids that resolve
+ * to a session we actually hold — a dead link is worse than no link, and an unresolved id
+ * usually means the child rollout has not been ingested yet.
+ */
+function SubagentLinks({ rec, hasSession, onOpenSession }: {
+  rec: RecordRow; hasSession?: (id: string) => boolean; onOpenSession?: (id: string) => void;
+}) {
+  if (!onOpenSession) return null;
+  const refs = subagentRefs(rec).filter((r) => (hasSession ? hasSession(r.id) : true));
+  if (refs.length === 0) return null;
+  return (
+    <div className="sub-jump">
+      {refs.map((r) => (
+        <button key={r.id} type="button" className="sub-jump-btn" title={'打开子 agent 会话 ' + r.id}
+          onClick={() => onOpenSession(r.id)}>
+          <span className="sub-jump-ico">↗</span>
+          打开子 agent 会话
+          {r.nickname ? <b> · {r.nickname}</b> : null}
+          <code>{r.id.slice(0, 8)}…</code>
+        </button>
+      ))}
+    </div>
   );
 }
 

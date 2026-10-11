@@ -4,6 +4,10 @@ import { Ledger } from './components/Ledger';
 import { Inspector } from './components/Inspector';
 import { Timeline } from './components/Timeline';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
+import {
+  EMPTY_NAV, canBack, canForward, pushPoint, stepBack, stepForward,
+  type NavPoint, type NavState,
+} from './lib/navstack';
 
 const SOURCES: Array<{ id: SourceId | 'all'; label: string }> = [
   { id: 'all', label: '全部' },
@@ -36,6 +40,46 @@ export function App() {
       return Number.isFinite(n) ? n : 420;
     } catch { return 420; }
   });
+
+  // --- navigation history (← / →) ---
+  const [nav, setNav] = useState<NavState<SourceId>>(EMPTY_NAV);
+  // Read inside the button handlers so they never capture a stale cursor.
+  const navRef = useRef(nav);
+  navRef.current = nav;
+
+  /** Record a jump. Re-selecting the place we are already at must not grow the stack. */
+  const pushNav = useCallback((p: NavPoint<SourceId>) => {
+    setNav((n) => pushPoint(n, p));
+  }, []);
+
+  /** Apply a history point WITHOUT recording a new one — that is what ← / → do. */
+  const openPoint = useCallback(async (p: NavPoint<SourceId>) => {
+    const rows = await api.sessions(p.source).catch(() => [] as SessionRow[]);
+    const hit = rows.find((r) => r.sessionId === p.sessionId);
+    if (!hit) return;
+    setFilter(p.source);
+    setSel(hit);
+    setSelectedRecord(null);
+    setJumpTo(null);
+    if (p.recordId) {
+      const rec = await api.record(p.source, p.sessionId, p.recordId).catch(() => null);
+      if (rec) { setSelectedRecord(rec); setInspOpen(true); setJumpTo(rec.recordId); }
+    }
+  }, []);
+
+  const goBack = useCallback(() => {
+    const { nav: next, point } = stepBack(navRef.current);
+    if (!point) return;
+    setNav(next);
+    void openPoint(point);
+  }, [openPoint]);
+
+  const goForward = useCallback(() => {
+    const { nav: next, point } = stepForward(navRef.current);
+    if (!point) return;
+    setNav(next);
+    void openPoint(point);
+  }, [openPoint]);
 
   // --- ingest (refresh) ---
   // 'idle'    : nothing running; button reads "提取新轨迹".
@@ -144,17 +188,26 @@ export function App() {
     api.sessions(filter === 'all' ? undefined : filter).then(setSessions).catch((e) => setError(String(e)));
   }, [filter]);
 
-  // Deep link: #/<source>/<sessionId>
+  // Deep link: #/<source>/<sessionId>[/<recordId>]
+  // The record segment makes "this exact message" shareable, and is what makes a jump
+  // between sessions and messages survive a reload.
   useEffect(() => {
     const apply = () => {
       const m = location.hash.replace(/^#\/?/, '');
       if (!m) return;
-      const [src, id] = m.split('/');
+      const [src, id, rid] = m.split('/');
       if (!src || !id) return;
       setFilter(src as SourceId);
       api.sessions(src as SourceId).then((rows) => {
         const hit = rows.find((r) => r.sessionId === decodeURIComponent(id));
-        if (hit) setSel(hit);
+        if (!hit) return;
+        setSel(hit);
+        if (!rid) return;
+        const recordId = decodeURIComponent(rid);
+        setJumpTo(recordId);
+        api.record(hit.source, hit.sessionId, recordId).then((rec) => {
+          if (rec) { setSelectedRecord(rec); setInspOpen(true); }
+        }).catch(() => {});
       }).catch(() => {});
     };
     apply();
@@ -164,9 +217,11 @@ export function App() {
 
   // Keep the hash in sync so the view is shareable / reloadable.
   useEffect(() => {
-    const next = sel ? '#/' + sel.source + '/' + encodeURIComponent(sel.sessionId) : '';
-    if (next && location.hash !== next) history.replaceState(null, '', next);
-  }, [sel]);
+    if (!sel) return;
+    let next = '#/' + sel.source + '/' + encodeURIComponent(sel.sessionId);
+    if (selectedRecord) next += '/' + encodeURIComponent(selectedRecord.recordId);
+    if (location.hash !== next) history.replaceState(null, '', next);
+  }, [sel, selectedRecord]);
 
   // The inspector's ✕ clears the selection; picking a listed tool call jumps to it.
   useEffect(() => {
@@ -190,13 +245,57 @@ export function App() {
     setSelectedRecord(null);
     setInspOpen(true);
     void jumpToRecord(recordId);
-  }, [jumpToRecord]);
+    if (sel) pushNav({ source: sel.source, sessionId: sel.sessionId, recordId });
+  }, [jumpToRecord, sel, pushNav]);
 
   /** Picking a ledger row must (re)open the panel, however it was closed. */
   const onLedgerSelect = useCallback((rec: RecordRow | null) => {
     setSelectedRecord(rec);
-    if (rec) setInspOpen(true);
-  }, []);
+    if (rec) {
+      setInspOpen(true);
+      if (sel) pushNav({ source: sel.source, sessionId: sel.sessionId, recordId: rec.recordId });
+    }
+  }, [sel, pushNav]);
+
+  /** Sidebar click: a fresh session, so the inspector goes back to "nothing selected". */
+  const selectSession = useCallback((s: SessionRow) => {
+    setSel(s);
+    setSelectedRecord(null);
+    setJumpTo(null);
+    setInspOpen(true);
+    setFilter(s.source);
+    pushNav({ source: s.source, sessionId: s.sessionId, recordId: null });
+  }, [pushNav]);
+
+  /**
+   * Open a session by id alone — used by the subagent jump link and the 返回父会话 link.
+   *
+   * Subagents are ordinary sessions here (the adapter keys each rollout by `payload.id`),
+   * so this is a lookup plus the same state change a sidebar click makes.
+   */
+  const openSessionById = useCallback(async (sessionId: string) => {
+    let hit = sessions.find((s) => s.sessionId === sessionId) ?? null;
+    if (!hit) {
+      // The sidebar list is filtered and capped; fall back to a full fetch before giving up.
+      const all = await api.sessions().catch(() => [] as SessionRow[]);
+      hit = all.find((s) => s.sessionId === sessionId) ?? null;
+    }
+    if (!hit) {
+      setError('找不到会话 ' + sessionId + '（可能尚未摄入，试试「提取新轨迹」）');
+      return;
+    }
+    setError(null);
+    setFilter(hit.source);
+    setSel(hit);
+    setSelectedRecord(null);
+    setJumpTo(null);
+    setInspOpen(true);
+    pushNav({ source: hit.source, sessionId: hit.sessionId, recordId: null });
+  }, [sessions, pushNav]);
+
+  // Known session ids, so a jump link is only rendered when it actually resolves.
+  const knownSessions = useMemo(() => new Set(sessions.map((s) => s.sessionId)), [sessions]);
+  const hasSession = useCallback((id: string) => knownSessions.has(id), [knownSessions]);
 
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -207,7 +306,22 @@ export function App() {
 
   return (
     <div className="app">
-      <ThemeSwitcher />
+      {/* ← / → sit immediately left of the appearance switcher: both are global chrome,
+          and the tour the arrows retrace is exactly what the links below create. */}
+      <div className="top-right">
+        <div className="nav-btns" role="group" aria-label="导航历史">
+          <button type="button" className="nav-btn" onClick={goBack} disabled={!canBack(nav)}
+            title="后退：上一个会话 / 消息">
+            <span aria-hidden="true">←</span>
+          </button>
+          <button type="button" className="nav-btn" onClick={goForward}
+            disabled={!canForward(nav)}
+            title="前进：回到后退前的位置">
+            <span aria-hidden="true">→</span>
+          </button>
+        </div>
+        <ThemeSwitcher />
+      </div>
       <aside className="sidebar">
         <div className="brand">
           <span className="logo">◈</span>
@@ -254,7 +368,7 @@ export function App() {
           {visible.map((s) => (
             <button key={s.source + s.sessionId}
               className={'session' + (sel?.source === s.source && sel?.sessionId === s.sessionId ? ' on' : '')}
-              onClick={() => { setSel(s); setSelectedRecord(null); }}>
+              onClick={() => selectSession(s)}>
               <div className="s-row1">
                 <span className={'pill ' + s.source}>{srcLabel(s.source)}</span>
                 <span className="s-time">{fmtTime(s.startedAt)}</span>
@@ -294,6 +408,14 @@ export function App() {
               <div className="head-main">
                 <span className={'pill ' + sel.source}>{srcLabel(sel.source)}</span>
                 <h2 title={sel.sessionId}>{sel.sessionId}</h2>
+                {/* A subagent's rollout has a parent; make the trip back one click. */}
+                {sel.parentSessionId && (
+                  <button type="button" className="link"
+                    title={'打开父会话 ' + sel.parentSessionId}
+                    onClick={() => void openSessionById(sel.parentSessionId!)}>
+                    ← 返回父会话{sel.agentNickname ? '（' + sel.agentNickname + '）' : ''}
+                  </button>
+                )}
               </div>
               <CapabilityMatrix caps={sel.capabilities} diagnostics={sel.diagnostics} />
               <div className="head-meta">
@@ -316,7 +438,8 @@ export function App() {
                       setInspWidth(w);
                       try { localStorage.setItem('trajview.inspectorWidth', String(w)); } catch {}
                     }} />
-                  <Inspector session={sel} recordId={selectedRecord?.recordId ?? null} onSelect={jumpToRecord} width={inspWidth} />
+                  <Inspector session={sel} recordId={selectedRecord?.recordId ?? null} onSelect={jumpToRecord} width={inspWidth}
+                    hasSession={hasSession} onOpenSession={(id) => void openSessionById(id)} />
                 </>
               )}
             </div>

@@ -387,10 +387,31 @@ code,pre,.mono{font-family:var(--mono)}
 .jt-children{margin-left:13px;border-left:1px solid var(--line);padding-left:9px}
 .jt-empty{color:var(--fg3);font-size:11px;padding-left:13px}
 
+/* ---------- top-right chrome: history arrows + appearance switcher ---------- */
+/* One fixed cluster so the arrows always sit flush against the switcher, whatever width
+   the labels take — positioning them separately would drift as the theme text changes. */
+.top-right{position:fixed;top:8px;right:12px;z-index:60;display:flex;align-items:center;gap:6px}
+.nav-btns{display:flex;gap:2px;padding:2px;background:var(--bg2);border:1px solid var(--line);border-radius:7px}
+.nav-btn{width:26px;height:23px;display:flex;align-items:center;justify-content:center;
+  background:none;border:none;border-radius:5px;cursor:pointer;color:var(--fg2);font-size:13px;line-height:1;
+  font-family:inherit}
+.nav-btn:hover:not(:disabled){background:var(--bg3);color:var(--fg)}
+.nav-btn:disabled{opacity:.35;cursor:default}
+
 /* ---------- appearance switcher ---------- */
-.theme-switch{position:fixed;top:8px;right:12px;z-index:60;display:flex;gap:2px;padding:2px;
+.theme-switch{display:flex;gap:2px;padding:2px;
   background:var(--bg2);border:1px solid var(--line);border-radius:7px}
 .theme-opt{background:none;border:none;border-radius:5px;padding:3px 10px;cursor:pointer;
   color:var(--fg2);font-size:11px}
 .theme-opt:hover{background:var(--bg3);color:var(--fg)}
 .theme-opt.on{background:var(--accent);color:var(--on-accent);font-weight:600}
+
+/* ---------- subagent jump link (inspector) ---------- */
+.sub-jump{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.sub-jump-btn{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;cursor:pointer;
+  background:color-mix(in srgb,var(--claude) 14%,transparent);border:1px solid var(--claude);
+  border-radius:5px;color:var(--claude);font-size:11px;font-family:inherit;text-align:left}
+.sub-jump-btn:hover{background:color-mix(in srgb,var(--claude) 26%,transparent)}
+.sub-jump-btn b{font-weight:600}
+.sub-jump-btn code{font-family:var(--mono);font-size:10px;opacity:.8}
+.sub-jump-ico{font-size:12px;line-height:1}
