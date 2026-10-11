@@ -14,6 +14,19 @@ import { parseLine } from '../sources/stableRead.ts';
 
 const iso = (t?: string): number | undefined => (t ? Date.parse(t) : undefined);
 
+/**
+ * Flatten a Codex `content` array (or bare string) to text.
+ *
+ * Shared by the `response_item` message path and the `UserMessage` echo below so the two
+ * can never drift — the classification depends on comparing them for exact equality.
+ */
+function contentText(content: unknown): string {
+  if (Array.isArray(content)) {
+    return content.map((c: any) => c?.text ?? '').filter(Boolean).join('\n');
+  }
+  return typeof content === 'string' ? content : '';
+}
+
 interface Pending { raw: RawLine; obj: any; }
 
 export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
@@ -23,6 +36,20 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
   };
 
   const pending: Pending[] = [];
+  /**
+   * Text of every message Codex itself marked as human input.
+   *
+   * Codex labels injected content with `role: "user"` too — `<environment_context>`,
+   * `<skill>`, `<subagent_notification>`, … — so the role alone cannot tell a human
+   * utterance from machine-injected context. What CAN tell them apart is the echo Codex
+   * writes for real ones: a paired `event_msg` → `item_completed` with
+   * `item.type === "UserMessage"` carrying the byte-identical text. Measured on this
+   * machine's rollouts: 5/5 human messages echoed, 0/7 injected ones.
+   *
+   * Collected in this pre-pass because the echo sits one ordinal LATER than the message
+   * it describes, so it is not yet known when the message itself is normalized.
+   */
+  const humanMessageTexts = new Set<string>();
   let hasOrdinal = false;
   for (const l of lines) {
     const o = parseLine(l);
@@ -36,6 +63,11 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
       continue;
     }
     if (typeof o.ordinal === 'number') hasOrdinal = true;
+    const item = o.payload?.item;
+    if (o.type === 'event_msg' && o.payload?.type === 'item_completed' && item?.type === 'UserMessage') {
+      const echoed = contentText(item.content);
+      if (echoed) humanMessageTexts.add(echoed);
+    }
     if (['event_msg', 'response_item', 'turn_context', 'session_meta', 'token_usage_record',
       'world_state', 'inter_agent_communication_metadata'].includes(o.type)) {
       pending.push({ raw: l, obj: o });
@@ -228,13 +260,26 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
     if (o.type === 'response_item') {
       const role = payload.role;
       if (payload.type === 'message') {
-        const text = (payload.content ?? []).map((c: any) => c.text ?? '').filter(Boolean).join('\n');
+        const text = contentText(payload.content);
         if (role === 'user') {
-          const t = ensureTurn(undefined, ts);
-          if (turns[t] && turns[t].startedAt === undefined) turns[t].startedAt = ts;
-          records.push({ recordId: rid('user' + orderOf(p)), kind: 'user', orderIndex: orderOf(p),
-            turnIndex: t, opensTurn: true, text: firstLine(text), detailText: text,
-            timeSeconds: null, startedAt: ts, flags: [] });
+          // Only a message Codex echoed as a `UserMessage` item is something the human
+          // actually sent; every other role=user item is injected context
+          // (`<environment_context>`, `<skill>`, `<subagent_notification>`, …) and is
+          // shown as 上下文 rather than dressed up as a user question.
+          const human = humanMessageTexts.has(text);
+          if (human) {
+            const t = ensureTurn(undefined, ts);
+            if (turns[t] && turns[t].startedAt === undefined) turns[t].startedAt = ts;
+            records.push({ recordId: rid('user' + orderOf(p)), kind: 'user', orderIndex: orderOf(p),
+              turnIndex: t, opensTurn: true, text: firstLine(text), detailText: text,
+              timeSeconds: null, startedAt: ts, flags: [] });
+          } else {
+            // Injected input must not fabricate a turn of its own; mirror the developer
+            // branch and attach to whatever turn is already open.
+            records.push({ recordId: rid('ctx' + orderOf(p)), kind: 'context', orderIndex: orderOf(p),
+              turnIndex: Math.max(currentTurn, 0), text: firstLine(text), detailText: text,
+              timeSeconds: null, startedAt: ts, flags: [] });
+          }
         } else if (role === 'assistant') {
           const t = ensureTurn(undefined, ts);
           if (currentStep < 0 || prevWasToolOutput) openStep(ts);

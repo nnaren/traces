@@ -5,7 +5,44 @@ import type { SessionRef } from '../src/types.ts';
 
 const REF: SessionRef = { source: 'codex', sessionId: 's1', path: '/tmp/s1.jsonl' };
 const buf = (lines: Array<any | string>) => Buffer.from(lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n');
-const run = (lines: Array<any | string>) => normalizeCodex(REF, splitLines(buf(lines)));
+
+/**
+ * Codex's echo for a REAL human message (see tests/codexUserVsContext.test.ts).
+ *
+ * Deliberately carries NO `ordinal`: an echo must never make a pre-0.147 fixture look
+ * like it has the ordinal layer (R1 falls back to physical-line-order when it doesn't),
+ * and the echo produces no record so its position is irrelevant.
+ */
+const userEcho = (text: string, ordinal: number) => ({
+  type: 'event_msg', timestamp: '2026-08-20T10:00:01.050Z',
+  payload: {
+    type: 'item_completed',
+    item: { type: 'UserMessage', id: 'um_' + ordinal, client_id: 'c' + ordinal, content: [{ type: 'text', text }] },
+  },
+});
+
+/**
+ * These fixtures model a human talking to Codex, so every role=user message gets the
+ * `UserMessage` echo Codex really writes for human input. The normalizer uses that echo to
+ * separate human questions from injected context (`<environment_context>`, `<skill>`, …);
+ * without it every message here would be classified as injected 上下文.
+ *
+ * The echo carries a fractional ordinal so it slots next to its message without colliding
+ * with the fixture's own integer ordinals. It produces no record — it is only consumed by
+ * the classifier — so record counts are unaffected.
+ */
+const run = (lines: Array<any | string>) => {
+  const out: Array<any | string> = [];
+  for (const l of lines) {
+    out.push(l);
+    if (typeof l !== 'string' && l?.type === 'response_item'
+      && l.payload?.type === 'message' && l.payload.role === 'user') {
+      const text = (l.payload.content ?? []).map((c: any) => c.text ?? '').filter(Boolean).join('\n');
+      out.push(userEcho(text, (l.ordinal ?? 0) + 0.5));
+    }
+  }
+  return normalizeCodex(REF, splitLines(buf(out)));
+};
 
 const meta = (extra: any = {}) => ({ type: 'session_meta', timestamp: '2026-08-20T10:00:00.000Z', payload: { session_id: 's1', cwd: '/w', cli_version: '0.153.4', ...extra } });
 const started = (id: string) => ({ type: 'event_msg', ordinal: 1, timestamp: '2026-08-20T10:00:01.000Z', payload: { type: 'task_started', turn_id: id } });
