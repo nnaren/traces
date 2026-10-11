@@ -66,6 +66,29 @@ code,pre,.mono{font-family:var(--mono)}
 .tab em{display:block;font-style:normal;opacity:.7;font-size:10px}
 .search{margin:6px 10px 10px;padding:7px 9px;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--fg);font-size:12px}
 .session-list{flex:1;overflow:auto;padding:0 8px 12px}
+
+/* ---------- ingest (refresh) ---------- */
+/* Whole row, so the error pre can collapse-below without spilling past the sidebar. */
+.refresh{padding:0 10px 10px}
+.refresh-btn{
+  display:flex;align-items:center;gap:6px;width:100%;
+  background:var(--bg3);border:1px solid var(--line);color:var(--fg2);
+  border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;
+  font-family:inherit;
+}
+.refresh-btn:hover:not(:disabled){background:var(--line);color:var(--fg)}
+.refresh-btn:disabled{cursor:default;opacity:.85}
+.refresh .ico,.refresh .spin{font-size:14px;line-height:1;display:inline-block;width:14px;text-align:center}
+.refresh .spin{animation:refresh-spin .9s linear infinite}
+@keyframes refresh-spin{to{transform:rotate(360deg)}}
+.refresh.running .refresh-btn{border-color:var(--accent);color:var(--fg)}
+.refresh.done .refresh-btn{border-color:var(--lane-context);color:var(--lane-context)}
+.refresh.error .refresh-btn{border-color:var(--err);color:var(--err)}
+.refresh-err{
+  margin:6px 0 0;padding:6px 8px;background:var(--bg);border:1px solid var(--err);
+  border-radius:4px;color:var(--err);font-family:var(--mono);font-size:10px;
+  max-height:80px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+}
 .session{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-left:3px solid transparent;border-radius:6px;padding:8px 9px;margin-bottom:4px;cursor:pointer;color:var(--fg)}
 .session:hover{background:var(--bg3)}
 .session.on{background:var(--bg3);border-color:var(--line);border-left-color:var(--accent)}
@@ -229,9 +252,38 @@ code,pre,.mono{font-family:var(--mono)}
 .flags{display:flex;gap:2px;flex:none}
 .flags i{font-style:normal;font-size:10px;color:var(--warn)}
 
+/* ---------- ledger: folded tools (Claude Code) ---------- */
+/* A message whose tool_use blocks were folded into its row stacks a chip line under the
+   summary line, so the row is one CHIPS_H taller than the plain 26px rows. */
+.row.has-tools{flex-direction:column;align-items:stretch;gap:0}
+.row-line{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.row.has-tools .row-line{flex:none;height:26px}
+.row-tools{display:flex;align-items:center;gap:6px;flex:1;min-height:0;overflow:hidden}
+.tc-count{flex:none;padding:0 5px;border-radius:99px;font-family:var(--mono);font-size:9px;font-weight:600;
+  background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.tc-chip{display:inline-flex;align-items:center;gap:4px;flex:none;max-width:340px;
+  padding:1px 7px;border-radius:4px;font-family:var(--mono);font-size:10px;white-space:nowrap;
+  background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--warn)}
+.tc-chip.err{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err)}
+.tc-chip-ico{font-style:normal;opacity:.75}
+.tc-chip b{font-weight:600}
+.tc-chip-args{overflow:hidden;text-overflow:ellipsis;color:var(--fg2)}
+.tc-chip-dur{flex:none;color:var(--fg3)}
+
 /* ---------- inspector ---------- */
 .inspector{flex:none;width:420px;border-left:1px solid var(--line);background:var(--bg2);overflow:auto;padding:0 18px 16px}
 @media (max-width:1100px){.inspector{width:340px}}
+
+/* Drag handle between the ledger and the inspector. */
+.resizer{
+  flex:none;width:5px;cursor:col-resize;
+  /* Center a wider hit area over the visible line so the 5px target still feels generous
+     when the cursor is at the edge. */
+  background:linear-gradient(to right,transparent 0,transparent 2px,var(--line) 2px,var(--line) 3px,transparent 3px);
+  background-clip:content-box;
+}
+.resizer:hover,.resizer:active{background-color:var(--bg3);background-image:none}
+.resizer:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 .empty-state{display:flex;align-items:center;justify-content:center;color:var(--fg3);height:120px}
 .insp-head{display:flex;align-items:center;gap:8px;padding:10px 0 8px;position:sticky;top:0;background:var(--bg2);z-index:2}
 .insp-head .kind{flex:none;width:auto;padding:1px 8px}

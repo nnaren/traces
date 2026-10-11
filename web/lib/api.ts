@@ -77,9 +77,33 @@ async function get<T>(url: string): Promise<T> {
   if (!r.ok) throw new Error(url + ' -> ' + r.status);
   return r.json() as Promise<T>;
 }
+async function post<T>(url: string): Promise<T> {
+  const r = await fetch(base + url, { method: 'POST' });
+  // The server uses 409 to signal "another ingest is already running". That is NOT an
+  // error from the caller's perspective — the caller will just start polling the same
+  // job via ingestStatus(). Surface the body either way so the caller can decide.
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok && r.status !== 409) {
+    throw new Error(url + ' -> ' + r.status + ' ' + JSON.stringify(body));
+  }
+  return body as T;
+}
+
+export interface IngestJob {
+  startedAt: number; finishedAt?: number; exitCode?: number | null;
+  stdout: string; stderr: string; error?: string; pid?: number;
+}
 
 export const api = {
   health: () => get<{ ok: boolean; sessions: Record<string, number>; total: number }>('/api/health'),
+  /** Returns the running job, the last finished job, or `{ idle: true }`. */
+  ingestStatus: () => get<({ idle: true } | (IngestJob & { idle?: false }))>('/api/ingest'),
+  /**
+   * Kicks off an ingest. The server returns 200 with the new job on success, or 409 with
+   * the already-running job if one is in flight — callers should treat either as "an
+   * ingest is happening, start polling".
+   */
+  ingest: () => post<{ started?: true; busy?: true; job: IngestJob }>('/api/ingest'),
   sessions: (source?: SourceId) =>
     get<SessionRow[]>('/api/sessions?limit=400' + (source ? '&source=' + source : '')),
   session: (source: SourceId, id: string) =>

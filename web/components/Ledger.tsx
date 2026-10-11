@@ -12,7 +12,34 @@ const stepNo = (idx: number, id?: string) => id ?? String(idx + 1);
 
 const PAGE = 200;
 const ROW_H = 26;
+/**
+ * Extra vertical room for the chip line under a message that has folded tool records.
+ * One line of compact chips fits in 22px.
+ */
+const CHIPS_H = 22;
 const OVERSCAN = 8;
+
+/**
+ * Largest row index whose top offset is <= `y`. `tops` is the prefix-sum array built in
+ * the Ledger, so `tops[i]` is the pixel offset of row `i` and `tops[i+1] - tops[i]` is
+ * its height. Binary search because the list can hold thousands of rows and this runs
+ * on every scroll event.
+ */
+function rowAt(tops: number[], y: number): number {
+  let lo = 0, hi = Math.max(0, tops.length - 1);
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (tops[mid] <= y) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+
+/** Pixel offset of row `idx`, for the timeline's jump-to-record scroll target. */
+function offsetOf(rows: RowModel[], idx: number): number {
+  let y = 0;
+  for (let i = 0; i < idx && i < rows.length; i++) y += rows[i].height;
+  return y;
+}
 
 /**
  * Tail-first, virtualized trajectory ledger.
@@ -139,11 +166,15 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
         setRecords(recs); setHasMore(more); setCursor(cur);
       }
 
-      const built = buildRows(recs, bounds.turns, bounds.steps);
-      const idx = built.findIndex((r) => r.record?.recordId === jumpTo);
+      const built = buildRows(recs, bounds.turns, bounds.steps, session.source === 'claude-code');
+      // A folded tool has no row of its own, so a timeline click that targets it must
+      // land on the message that owns it instead of giving up.
+      let idx = built.findIndex((r) => r.record?.recordId === jumpTo);
+      if (idx < 0) idx = built.findIndex((r) => r.attachedTools?.some((t) => t.recordId === jumpTo));
       if (idx < 0) { onJumpDone?.(); return; }
-      // Land it a little above centre so the rows above it give context.
-      const target = Math.max(0, idx * ROW_H - viewport / 3);
+      // Land it a little above centre so the rows above it give context. Heights vary
+      // (a row with folded tools is taller), so sum them rather than multiplying.
+      const target = Math.max(0, offsetOf(built, idx) - viewport / 3);
       setFollow(false);
       setScrollTop(target);
       const el = boxRef.current;
@@ -162,11 +193,22 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
     if (el && follow && records.length) el.scrollTop = el.scrollHeight;
   }, [records.length, follow]);
 
-  const rows = useMemo(() => buildRows(records, bounds.turns, bounds.steps), [records, bounds]);
+  const rows = useMemo(
+    () => buildRows(records, bounds.turns, bounds.steps, session.source === 'claude-code'),
+    [records, bounds, session.source]);
   const total = rows.length;
   const viewport = boxRef.current?.clientHeight ?? 600;
-  const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
-  const last = Math.min(total, Math.ceil((scrollTop + viewport) / ROW_H) + OVERSCAN);
+  // Prefix sums, because a row carrying folded tools is one chip-line taller than the
+  // rest: `index * ROW_H` no longer gives the offset of row `index`.
+  const tops = useMemo(() => {
+    const a = new Array<number>(rows.length + 1);
+    a[0] = 0;
+    for (let i = 0; i < rows.length; i++) a[i + 1] = a[i] + rows[i].height;
+    return a;
+  }, [rows]);
+  const totalH = tops[rows.length] ?? 0;
+  const first = Math.max(0, rowAt(tops, scrollTop) - OVERSCAN);
+  const last = Math.min(total, rowAt(tops, scrollTop + viewport) + 1 + OVERSCAN);
   const slice = rows.slice(first, last);
 
   return (
@@ -194,10 +236,13 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
         {hasMore && (
           <button className="load-earlier" onClick={loadEarlier}>载入更早 {PAGE} 条 ▲</button>
         )}
-        <div style={{ height: total * ROW_H, position: 'relative' }}>
-          <div style={{ position: 'absolute', top: first * ROW_H, left: 0, right: 0 }}>
+        <div style={{ height: totalH, position: 'relative' }}>
+          <div style={{ position: 'absolute', top: tops[first] ?? 0, left: 0, right: 0 }}>
             {slice.map((r) => <Row key={r.rowKey} row={r}
-              active={r.record?.recordId === selected}
+              active={r.record?.recordId === selected
+                // A folded tool is still selectable from the timeline / inspector; ring
+                // the message row that owns it so the click has a visible target.
+                || (r.attachedTools?.some((t) => t.recordId === selected) ?? false)}
               onSelect={onSelect} />)}
           </div>
         </div>
@@ -211,12 +256,74 @@ interface RowModel {
   rowKey: string; height: number;
   kind: 'turn' | 'step' | 'record';
   label: string; record?: RecordRow; meta?: string;
+  /** Tool records folded into this message's row (see `mergeTools` in buildRows). */
+  attachedTools?: RecordRow[];
 }
 
-function buildRows(records: RecordRow[], turns: TurnRow[], steps: StepRow[]): RowModel[] {
+/**
+ * The message summary a tool-only assistant turn gets when there is no text block. Once
+ * its tools are folded into the same row the placeholder says nothing the tools don't,
+ * so it is suppressed rather than printed above the call it describes.
+ */
+export const TOOL_ONLY = '（仅工具调用）';
+
+/**
+ * Whether a record's row needs the extra chip line.
+ *
+ * A tool-only message promotes its FIRST tool onto the summary line, so it only needs a
+ * chip line when more tools follow. A message that has its own text keeps every tool as
+ * a chip. buildRows sizes the row and Row decides what to paint, so both must ask this
+ * one question — when they disagreed the row reserved 22px it never filled.
+ */
+function rowHasChipLine(summary: string, attached: RecordRow[] | undefined): boolean {
+  if (!attached || attached.length === 0) return false;
+  return summary === TOOL_ONLY ? attached.length > 1 : true;
+}
+
+/**
+ * Flatten records into ledger rows, inserting turn/step separators.
+ *
+ * Exported for tests: the tool-folding pass is the part worth locking down, and it needs
+ * no DOM to exercise.
+ */
+export function buildRows(records: RecordRow[], turns: TurnRow[], steps: StepRow[], mergeTools: boolean): RowModel[] {
   const turnIds = new Map(turns.map((t) => [t.turn_index, t.source_turn_id]));
   // step_index is a flat counter; the source restarts it per turn, so key on both.
   const stepIds = new Map(steps.map((s) => [`${s.turn_index}:${s.step_index}`, s.source_step_id]));
+
+  // Claude Code emits an assistant message AND every tool_use block it contained from
+  // ONE JSONL line, but as separate records. Rendered as separate rows a single step
+  // reads as "助手 / 工具", and two adjacent tool-only steps read as a run of bare
+  // "（仅工具调用）" 助手 rows with no visible owner. Fold each tool into the message
+  // that issued it.
+  //
+  // The records themselves are untouched — this is a presentation fold. The inspector
+  // still loads every tool through the siblings API, so 参数 / 结果 remain reachable.
+  const toolsByOwner = new Map<string, RecordRow[]>();
+  const folded = new Set<string>();
+  if (mergeTools) {
+    const byStep = new Map<string, RecordRow[]>();
+    for (const r of records) {
+      if (r.turnIndex == null || r.stepIndex == null) continue;
+      const k = `${r.turnIndex}:${r.stepIndex}`;
+      const g = byStep.get(k);
+      if (g) g.push(r); else byStep.set(k, [r]);
+    }
+    for (const group of byStep.values()) {
+      // Records arrive DESCENDING by order_index, so sort ascending to make "the message
+      // that precedes this tool" well defined. A Claude step holds exactly one message.
+      group.sort((a, b) => a.orderIndex - b.orderIndex);
+      let owner: RecordRow | null = null;
+      for (const r of group) {
+        if (r.kind === 'message' || r.kind === 'reasoning') { owner = r; continue; }
+        if (owner && (r.kind === 'tool' || r.kind === 'subtool')) {
+          const list = toolsByOwner.get(owner.recordId);
+          if (list) list.push(r); else toolsByOwner.set(owner.recordId, [r]);
+          folded.add(r.recordId);
+        }
+      }
+    }
+  }
 
   const out: RowModel[] = [];
   // Separators are keyed by a running ordinal, NOT by turn/step index. Measured on session
@@ -226,6 +333,7 @@ function buildRows(records: RecordRow[], turns: TurnRow[], steps: StepRow[]): Ro
   // records between them.
   let lastTurn = -1, lastStep = -1, sep = 0;
   for (const r of records) {
+    if (folded.has(r.recordId)) continue;
     const t = r.turnIndex ?? -1, s = r.stepIndex ?? -1;
     if (t !== lastTurn) {
       out.push({ rowKey: 'T' + (sep++), height: ROW_H, kind: 'turn',
@@ -239,7 +347,10 @@ function buildRows(records: RecordRow[], turns: TurnRow[], steps: StepRow[]): Ro
         meta: r.startedAt ? fmtTime(r.startedAt) : undefined });
       lastStep = s;
     }
-    out.push({ rowKey: r.recordId, height: ROW_H, kind: 'record', label: '', record: r });
+    const attached = toolsByOwner.get(r.recordId);
+    out.push({ rowKey: r.recordId,
+      height: ROW_H + (rowHasChipLine(r.summary, attached) ? CHIPS_H : 0),
+      kind: 'record', label: '', record: r, attachedTools: attached });
   }
   return out;
 }
@@ -260,21 +371,68 @@ function Row({ row, active, onSelect }: { row: RowModel; active: boolean; onSele
   // JSON object picked out in the tool colour. Rendering the raw `bash({…})` makes the
   // arguments read as part of a call expression instead of as data.
   const parts = isTool ? splitToolLabel(r.summary, r.toolName ?? undefined) : null;
+  const attached = row.attachedTools ?? [];
+  // A tool-only message carries the "（仅工具调用）" placeholder. With its tools folded in
+  // underneath, the placeholder adds nothing and made one step read as two 助手 rows —
+  // so promote the FIRST tool onto the summary line and show the rest as chips.
+  const toolOnly = attached.length > 0 && r.summary === TOOL_ONLY;
+  const rest = toolOnly ? attached.slice(1) : attached;
+  const lead = toolOnly ? attached[0] : null;
+  const leadParts = lead ? splitToolLabel(lead.summary, lead.toolName ?? undefined) : null;
+  // Same predicate buildRows used to size this row; see rowHasChipLine.
+  const hasChips = rowHasChipLine(r.summary, attached);
+
   return (
-    <div className={'row rec ' + r.kind + (active ? ' active' : '') + (r.isError ? ' err' : '')}
-      style={{ height: ROW_H }} onClick={() => onSelect(r)}>
-      <span className={'kind ' + r.kind} title={kindTitle(r.kind)}>{kindLabel(r.kind)}</span>
-      <span className="idx">{r.orderIndex}</span>
-      {parts && parts.args
-        ? <span className="sum" title={r.summary}>
-            <span className="tname">{parts.name}</span>
-            <span className="targs">{parts.args}</span>
-          </span>
-        : <span className="sum" title={r.summary}>{r.summary || <em className="muted">(空)</em>}</span>}
-      {r.usage && <span className="tok" title={usageTitle(r.usage)}>{tokLabel(r.usage)}</span>}
-      {r.flags.length > 0 && <span className="flags">{r.flags.map((f) => <i key={f} title={flagTitle(f)}>{flagIcon(f)}</i>)}</span>}
-      <span className="dur">{fmtDur(r.timeSeconds)}</span>
+    <div className={'row rec ' + r.kind + (active ? ' active' : '') + (r.isError ? ' err' : '')
+      + (hasChips ? ' has-tools' : '')}
+      style={{ height: row.height }} onClick={() => onSelect(r)}>
+      <div className="row-line">
+        <span className={'kind ' + r.kind} title={kindTitle(r.kind)}>{kindLabel(r.kind)}</span>
+        <span className="idx">{r.orderIndex}</span>
+        {lead
+          ? <span className="sum" title={lead.summary}>
+              <span className="tname">{leadParts?.name ?? lead.toolName}</span>
+              <span className="targs">{leadParts?.args}</span>
+            </span>
+          : parts && parts.args
+            ? <span className="sum" title={r.summary}>
+                <span className="tname">{parts.name}</span>
+                <span className="targs">{parts.args}</span>
+              </span>
+            : <span className="sum" title={r.summary}>{r.summary || <em className="muted">(空)</em>}</span>}
+        {/* Only worth showing once there is more than the one call already on this line. */}
+        {attached.length > 1 && (
+          <span className="tc-count" title={`该 step 共 ${attached.length} 个工具调用`}>⚒{attached.length}</span>
+        )}
+        {r.usage && <span className="tok" title={usageTitle(r.usage)}>{tokLabel(r.usage)}</span>}
+        {r.flags.length > 0 && <span className="flags">{r.flags.map((f) => <i key={f} title={flagTitle(f)}>{flagIcon(f)}</i>)}</span>}
+        <span className="dur">{fmtDur(lead ? lead.timeSeconds : r.timeSeconds)}</span>
+      </div>
+      {hasChips && (
+        <div className="row-tools">
+          {rest.map((t) => <ToolChip key={t.recordId} rec={t} />)}
+        </div>
+      )}
     </div>
+  );
+}
+
+/**
+ * One folded tool, rendered compactly under its owning message.
+ *
+ * Clicking bubbles to the message row (the tool has no ledger row of its own any more),
+ * which opens the inspector where 参数 / 结果 are shown in full — so the chip only has
+ * to carry enough to identify the call.
+ */
+function ToolChip({ rec }: { rec: RecordRow }) {
+  const { name, args } = splitToolLabel(rec.summary, rec.toolName ?? undefined);
+  return (
+    <span className={'tc-chip' + (rec.isError ? ' err' : '')} title={rec.summary}>
+      <i className="tc-chip-ico">⚒</i>
+      <b>{name}</b>
+      {args && <span className="tc-chip-args">{args}</span>}
+      {rec.timeSeconds != null && <span className="tc-chip-dur">{fmtDur(rec.timeSeconds)}</span>}
+    </span>
   );
 }
 

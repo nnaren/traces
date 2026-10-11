@@ -325,14 +325,26 @@ export class Store {
     ).all(source, sessionId, turnIndex, stepIndex) as any[];
   }
 
-  /** The tool window owned by `row`: (row.order_index, next assistant's order_index). */
+  /**
+   * The tool window owned by `row`: [row.order_index, next assistant's order_index).
+   *
+   * The lower bound is INCLUSIVE. A Claude Code assistant line emits the message and
+   * every one of its tool_use blocks from a single JSONL row, and the normalizer slots
+   * the tools at fractional order_index values immediately above the message's own
+   * (`order + 0.001`, `+ 0.002`, …). A strict `>` dropped every one of them, so a
+   * tool-call-only assistant message reported "该 step 没有工具调用" in the inspector.
+   *
+   * The record itself is excluded by `record_id`: when the queried row IS a tool, the
+   * inclusive bound would otherwise return it as its own sibling.
+   */
   getOwnedToolCalls(source: SourceId, sessionId: string, row: any): any[] {
     const rows = this.getStepRecords(source, sessionId, row.turn_index, row.step_index);
     const next = rows.find((r) => (r.kind === 'message' || r.kind === 'reasoning') && r.order_index > row.order_index);
     const bound = next ? next.order_index : Number.MAX_SAFE_INTEGER;
     return rows.filter((r) =>
       (r.kind === 'tool' || r.kind === 'subtool')
-      && r.order_index > row.order_index && r.order_index < bound);
+      && r.record_id !== row.record_id
+      && r.order_index >= row.order_index && r.order_index < bound);
   }
 
   recordDetail(row: any): string | undefined {

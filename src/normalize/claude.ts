@@ -127,6 +127,18 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
       steps.push({ stepIndex, turnIndex: t, boundaryConfidence: 'derived', startedAt: ts,
         ttftMs: null, decodeMs: null, model: msg?.model });
 
+      // Sub-record ordering. One assistant JSONL line yields a message row AND one row
+      // per tool_use block, but they all shared `order` (= the physical line index).
+      // `getOwnedToolCalls` looks for sibling tools in
+      // `(row.order_index, next message.order_index)`, so tools sitting at the SAME
+      // order_index as their owning message fell outside that window and the inspector
+      // reported "该 step 没有工具调用" for every tool-call-only message.
+      // Slot the message at `order` and each tool at a fractional value just above it,
+      // so a sub-record's order_index reflects its position within the source line. The
+      // 0.001 stride can never collide with a real line index (the next line is the
+      // integer `i+1`).
+      let subOrder = order + 0.001;
+
       let text = '';
       for (const b of blocks) {
         if (b.type === 'thinking') {
@@ -175,12 +187,13 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
         if (b.type !== 'tool_use') continue;
         const inputRaw = safeJson(b.input);
         const rec: NormRecord = {
-          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: order, turnIndex: t, stepIndex,
+          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: subOrder, turnIndex: t, stepIndex,
           text: b.name + '(' + truncate(inputRaw, 80) + ')', detailText: inputRaw,
           toolName: b.name, callId: b.id, timeSeconds: null, startedAt: ts,
           tool: { callId: b.id, name: b.name, inputRaw, startedAt: ts, durationMs: null, depth: 0 },
           flags: [],
         };
+        subOrder += 0.001;
         records.push(rec);
         toolById.set(b.id, rec);
       }

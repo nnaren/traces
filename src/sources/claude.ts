@@ -58,10 +58,19 @@ export const claudeAdapter: TrajectorySourceAdapter = {
           try {
             const buf = Buffer.alloc(64 * 1024);
             const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-            const nl = buf.toString('utf8', 0, bytesRead).indexOf('\n');
+            // Same UTF-8 boundary bug as codex.ts — see the note there. Any header whose
+            // first line has multi-byte chars was being sliced mid-character and the
+            // session was silently dropped from the ledger.
+            let nl = -1;
+            for (let i = 0; i < bytesRead; i++) {
+              if (buf[i] === 0x0a) { nl = i; break; }
+            }
             first = JSON.parse(buf.toString('utf8', 0, nl > 0 ? nl : bytesRead));
           } finally { await fd.close(); }
-        } catch { continue; }
+        } catch (err) {
+          console.warn('trajview: claude header unreadable, skipping: ' + p + ' :: ' + (err instanceof Error ? err.message : String(err)));
+          continue;
+        }
         if (!first || typeof first !== 'object') continue;
         const st = await fs.stat(p).catch(() => undefined);
         yield {

@@ -31,8 +31,10 @@ const stepNo = (idx?: number, id?: string) => id ?? (idx != null ? String(idx + 
 
 type Tab = 'overview' | 'preview' | 'raw' | 'input' | 'output' | 'schema' | 'timing';
 
-export function Inspector({ session, recordId, onSelect }: {
+export function Inspector({ session, recordId, onSelect, width }: {
   session: SessionRow; recordId: string | null; onSelect?: (recordId: string) => void;
+  /** Pixel width override applied as an inline style. Falls back to the CSS default. */
+  width?: number;
 }) {
   const [rec, setRec] = useState<(RecordRow & { siblings?: SiblingTool[] }) | null>(null);
   const [step, setStep] = useState<StepRow | null>(null);
@@ -77,7 +79,7 @@ export function Inspector({ session, recordId, onSelect }: {
   useEffect(() => { setTab('overview'); }, [rec?.recordId]);
 
   if (!rec) {
-    return <aside className="inspector empty-state">选择账本中的一条记录以查看详情</aside>;
+    return <aside className="inspector empty-state" style={width ? { width } : undefined}>选择账本中的一条记录以查看详情</aside>;
   }
 
   // Encrypted reasoning no longer produces its own record, so the flag may be absent:
@@ -100,7 +102,7 @@ export function Inspector({ session, recordId, onSelect }: {
   );
 
   return (
-    <aside className="inspector">
+    <aside className="inspector" style={width ? { width } : undefined}>
       <div className="insp-head">
         <span className={'kind ' + rec.kind}>{KIND_LABEL[rec.kind] ?? rec.kind}</span>
         <span className="idx">

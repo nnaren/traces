@@ -2,6 +2,7 @@
  * HTTP API + static host. Plain node:http, no framework.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,46 @@ import type { SourceId } from '../types.ts';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
 const WEB_DIST = path.join(ROOT, 'web', 'dist');
+
+/**
+ * State of the most recent (or in-flight) ingest triggered from the UI. The server is
+ * the only writer of this struct: it owns the lock so two browser tabs (or a terminal
+ * plus a tab) cannot both start ingest against the same SQLite file. The actual work
+ * runs in a child process so we don't fight the WAL writer we ourselves hold open via
+ * `store`.
+ */
+type IngestJob = {
+  startedAt: number; finishedAt?: number; exitCode?: number | null;
+  /** Tail of stdout/stderr, capped so a runaway run cannot balloon memory. */
+  stdout: string; stderr: string; error?: string;
+  pid?: number; dataDir: string;
+};
+let ingestJob: IngestJob | null = null;
+
+function startIngest(dataDir: string): IngestJob | { busy: true; job: IngestJob } {
+  if (ingestJob && ingestJob.finishedAt === undefined) return { busy: true, job: ingestJob };
+  // Re-use the CLI the user would run by hand. `--silent` suppresses npm's own preamble,
+  // `--` separates npm's args from the script's, and `--data-dir` keeps the spawn pointed
+  // at the same store the server is reading from. FORCE_COLOR=0 stops npm from emitting
+  // ANSI codes into the captured stdout.
+  const child: ChildProcess = spawn(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['run', 'ingest', '--silent', '--', '--data-dir', dataDir],
+    { cwd: ROOT, env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' } },
+  );
+  const job: IngestJob = { startedAt: Date.now(), stdout: '', stderr: '', pid: child.pid, dataDir };
+  ingestJob = job;
+  const cap = 64 * 1024;
+  const onChunk = (key: 'stdout' | 'stderr') => (b: Buffer) => {
+    const s = job[key] + b.toString();
+    job[key] = s.length > cap ? s.slice(-cap) : s;
+  };
+  child.stdout?.on('data', onChunk('stdout'));
+  child.stderr?.on('data', onChunk('stderr'));
+  child.on('exit', (code) => { job.finishedAt = Date.now(); job.exitCode = code; });
+  child.on('error', (e) => { job.finishedAt = Date.now(); job.error = e.message; });
+  return job;
+}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -40,7 +81,7 @@ const TIMELINE_KINDS = new Set([
 
 export function startServer(opts: { dataDir: string; port: number; host?: string }) {
   return Store.open(opts.dataDir).then((store) => {
-    const server = createServer((req, res) => { void handle(req, res, store); });
+    const server = createServer((req, res) => { void handle(req, res, store, opts.dataDir); });
     server.listen(opts.port, opts.host ?? '127.0.0.1', () => {
       const a = server.address();
       console.log('trajview listening on http://' + (opts.host ?? '127.0.0.1') + ':' + (typeof a === 'object' && a ? a.port : opts.port));
@@ -49,7 +90,7 @@ export function startServer(opts: { dataDir: string; port: number; host?: string
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, store: Store) {
+async function handle(req: IncomingMessage, res: ServerResponse, store: Store, dataDir: string) {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const p = url.pathname;
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -57,6 +98,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store) {
     if (p === '/api/health') {
       const counts = store.countSessions();
       return json(res, { ok: true, sessions: counts, total: Object.values(counts).reduce((a, b) => a + b, 0) });
+    }
+    if (p === '/api/ingest' && req.method === 'GET') {
+      return json(res, ingestJob ?? { idle: true });
+    }
+    if (p === '/api/ingest' && req.method === 'POST') {
+      const started = startIngest(dataDir);
+      if ('busy' in started) return json(res, { busy: true, job: started.job }, 409);
+      return json(res, { started: true, job: started });
     }
     if (p === '/api/sessions') {
       const source = url.searchParams.get('source') as SourceId | null;

@@ -73,10 +73,24 @@ export const codexAdapter: TrajectorySourceAdapter = {
           try {
             const buf = Buffer.alloc(64 * 1024);
             const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-            const nl = buf.toString('utf8', 0, bytesRead).indexOf('\n');
+            // Scan the RAW BYTES for '\n', not the decoded string. UTF-8 multi-byte chars
+            // (base_instructions.text is full of them) shift `indexOf` off the byte
+            // boundary, and `buf.toString('utf8', 0, nl)` then slices mid-character and
+            // truncates the JSON, which the parser reports as "Unterminated string" — and
+            // the catch below silently dropped the session. That bug lost a codex
+            // session with a large system prompt until it was caught by hand.
+            let nl = -1;
+            for (let i = 0; i < bytesRead; i++) {
+              if (buf[i] === 0x0a) { nl = i; break; }
+            }
             first = JSON.parse(buf.toString('utf8', 0, nl > 0 ? nl : bytesRead));
           } finally { await fd.close(); }
-        } catch { continue; }
+        } catch (err) {
+          // Don't swallow silently — a malformed header was the original bug and we don't
+          // want a regression to disappear into a lower count again.
+          console.warn('trajview: codex header unreadable, skipping: ' + p + ' :: ' + (err instanceof Error ? err.message : String(err)));
+          continue;
+        }
         if (first?.type !== 'session_meta') continue;
         const st = await fs.stat(p).catch(() => undefined);
         yield {
