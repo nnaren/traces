@@ -116,6 +116,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS steps (
         source TEXT, session_id TEXT, step_index INTEGER, turn_index INTEGER,
+        source_step_id TEXT,
         boundary_confidence TEXT, started_at INTEGER, ended_at INTEGER,
         ttft_ms INTEGER, decode_ms INTEGER, model TEXT, usage_json TEXT, reasoning_json TEXT,
         PRIMARY KEY (source, session_id, step_index)
@@ -126,6 +127,7 @@ export class Store {
         turn_index INTEGER, step_index INTEGER, source_seq TEXT,
         started_at INTEGER, time_seconds REAL,
         tool_name TEXT, call_id TEXT, is_error INTEGER,
+        tool_json TEXT,
         usage_json TEXT, flags_json TEXT,
         summary TEXT, detail_text TEXT, detail_blob TEXT,
         PRIMARY KEY (source, session_id, record_id)
@@ -144,6 +146,18 @@ export class Store {
         tokenize='unicode61'
       );
     `);
+
+    // CREATE TABLE IF NOT EXISTS never adds a column to an existing table, so derived
+    // stores created before a column landed need it appended here. The derived layer is
+    // rebuildable from the vault, but a cheap ALTER avoids forcing a full re-ingest.
+    const cols = (table: string): string[] =>
+      (this.db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map((c) => c.name);
+    if (!cols('steps').includes('source_step_id')) {
+      this.db.exec('ALTER TABLE steps ADD COLUMN source_step_id TEXT');
+    }
+    if (!cols('records').includes('tool_json')) {
+      this.db.exec('ALTER TABLE records ADD COLUMN tool_json TEXT');
+    }
   }
 
   /**
@@ -211,18 +225,18 @@ export class Store {
       ]));
 
       const insStep = this.db.prepare(`INSERT INTO steps (source,session_id,step_index,turn_index,
-        boundary_confidence,started_at,ended_at,ttft_ms,decode_ms,model,usage_json,reasoning_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
+        source_step_id, boundary_confidence,started_at,ended_at,ttft_ms,decode_ms,model,usage_json,reasoning_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (const st of s.steps) insStep.run(...nums([
-        s.source, s.sessionId, st.stepIndex, st.turnIndex, st.boundaryConfidence,
+        s.source, s.sessionId, st.stepIndex, st.turnIndex, st.sourceStepId ?? null, st.boundaryConfidence,
         st.startedAt, st.endedAt, st.ttftMs, st.decodeMs, st.model ?? null,
         st.usage ? JSON.stringify(st.usage) : null, st.reasoning ? JSON.stringify(st.reasoning) : null,
       ]));
 
       const insRec = this.db.prepare(`INSERT INTO records (source,session_id,record_id,order_index,kind,
         turn_index,step_index,source_seq,started_at,time_seconds,tool_name,call_id,is_error,
-        usage_json,flags_json,summary,detail_text,detail_blob)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        tool_json,usage_json,flags_json,summary,detail_text,detail_blob)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const insFts = this.db.prepare('INSERT INTO records_fts (text,session_id,source,record_id) VALUES (?,?,?,?)');
       for (const r of s.records) {
         const detail = r.detailText ?? null;
@@ -234,6 +248,7 @@ export class Store {
           s.source, s.sessionId, r.recordId, r.orderIndex, r.kind, r.turnIndex, r.stepIndex,
           r.sourceSeq != null ? String(r.sourceSeq) : null, r.startedAt, r.timeSeconds,
           r.toolName ?? null, r.callId ?? null, r.isError ? 1 : 0,
+          r.tool ? JSON.stringify(r.tool) : null,
           r.usage ? JSON.stringify(r.usage) : null, JSON.stringify(r.flags), r.text,
           blob ? null : detail, blob,
         ]));
@@ -293,6 +308,31 @@ export class Store {
   getRecord(source: SourceId, sessionId: string, recordId: string): any | undefined {
     return this.db.prepare('SELECT * FROM records WHERE source=? AND session_id=? AND record_id=?')
       .get(source, sessionId, recordId);
+  }
+
+  /**
+   * Tool calls that BELONG to one record: everything after it and before the next
+   * assistant record in the same step.
+   *
+   * This bound matters for Codex, which alternates AgentMessage and Reasoning blocks:
+   *   AgentMessage → tool ×N → Reasoning → tool ×N → Reasoning → …
+   * Returning the whole step would credit an AgentMessage with the tools that the
+   * FOLLOWING Reasoning block issued.
+   */
+  getStepRecords(source: SourceId, sessionId: string, turnIndex: number, stepIndex: number): any[] {
+    return this.db.prepare(
+      'SELECT * FROM records WHERE source=? AND session_id=? AND turn_index=? AND step_index=? ORDER BY order_index',
+    ).all(source, sessionId, turnIndex, stepIndex) as any[];
+  }
+
+  /** The tool window owned by `row`: (row.order_index, next assistant's order_index). */
+  getOwnedToolCalls(source: SourceId, sessionId: string, row: any): any[] {
+    const rows = this.getStepRecords(source, sessionId, row.turn_index, row.step_index);
+    const next = rows.find((r) => (r.kind === 'message' || r.kind === 'reasoning') && r.order_index > row.order_index);
+    const bound = next ? next.order_index : Number.MAX_SAFE_INTEGER;
+    return rows.filter((r) =>
+      (r.kind === 'tool' || r.kind === 'subtool')
+      && r.order_index > row.order_index && r.order_index < bound);
   }
 
   recordDetail(row: any): string | undefined {

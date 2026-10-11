@@ -1,75 +1,332 @@
-import React, { useEffect, useState } from 'react';
-import { api, fmtDur, fmtTime, type RecordRow, type SessionRow } from '../lib/api';
+import React, { useEffect, useMemo, useState } from 'react';
+import { api, fmtDur, splitToolLabel, type RecordRow, type SessionRow, type SiblingTool, type StepRow, type TurnRow } from '../lib/api';
+import { Markdown } from './Markdown';
+import { JsonTree } from './JsonTree';
 
-export function Inspector({ session, recordId }: { session: SessionRow; recordId: string | null }) {
-  const [rec, setRec] = useState<RecordRow | null>(null);
-  const [tab, setTab] = useState<'summary' | 'detail'>('detail');
+/**
+ * Record inspector, following the DSH `ui-trajectory` inspector:
+ *   header  kind badge + 第 N 轮 · 第 M 步
+ *   tabs    概述 / 预览 / 原始内容
+ *   概述    来源 · 状态 · Token · 请求计时
+ *   预览    思考 · 输入 · 输出
+ *
+ * Timing lives on the STEP (one step is one model call), so a record that belongs to a
+ * step borrows that step's TTFT / decode / throughput. Anything the source never recorded
+ * renders as "—" — a missing measurement is never filled with a guess.
+ */
+
+const KIND_LABEL: Record<string, string> = {
+  system: '系统', user: '用户', context: '上下文', compacted: '压缩',
+  message: '助手', reasoning: '推理', tool: '工具', subtool: '子工具',
+  'request-header': '请求头', 'turn-end': '轮次结束', 'session-end': '会话结束',
+};
+
+/**
+ * Display number for a turn/step. DSH restarts its step counter inside every turn, so the
+ * source's own number wins; `turnIndex+1` / `stepIndex+1` is only the fallback for sources
+ * that declare no numbering (Claude Code, Codex).
+ */
+const turnNo = (idx?: number, id?: string) => id ?? (idx != null ? String(idx + 1) : '—');
+const stepNo = (idx?: number, id?: string) => id ?? (idx != null ? String(idx + 1) : '—');
+
+type Tab = 'overview' | 'preview' | 'raw' | 'input' | 'output' | 'schema' | 'timing';
+
+export function Inspector({ session, recordId, onSelect }: {
+  session: SessionRow; recordId: string | null; onSelect?: (recordId: string) => void;
+}) {
+  const [rec, setRec] = useState<(RecordRow & { siblings?: SiblingTool[] }) | null>(null);
+  const [step, setStep] = useState<StepRow | null>(null);
+  const [turn, setTurn] = useState<TurnRow | null>(null);
+  const [tab, setTab] = useState<Tab>('overview');
+  // Collapsible sections. 工具调用 is intentionally absent: it is always shown.
+  const [open, setOpen] = useState<Record<string, boolean>>({
+    source: true, timing: true, thinking: true,
+  });
 
   useEffect(() => {
-    if (!recordId) { setRec(null); return; }
-    api.record(session.source, session.sessionId, recordId).then(setRec).catch(() => setRec(null));
+    if (!recordId) { setRec(null); setStep(null); setTurn(null); return; }
+    let alive = true;
+    setRec(null); setStep(null); setTurn(null);
+    api.record(session.source, session.sessionId, recordId).then((r) => {
+      if (!alive) return;
+      setRec(r);
+      // Timing/TTFT/reasoning belong to the step, and the source's own turn/step
+      // numbers live on the turn/step rows — pull the session once to find both.
+      if (r.stepIndex != null || r.turnIndex != null) {
+        api.session(session.source, session.sessionId).then((s) => {
+          if (!alive) return;
+          setStep(r.stepIndex != null
+            ? s.steps.find((x) => x.step_index === r.stepIndex) ?? null : null);
+          setTurn(r.turnIndex != null
+            ? s.turns.find((x) => x.turn_index === r.turnIndex) ?? null : null);
+        }).catch(() => {});
+      }
+    }).catch(() => { if (alive) setRec(null); });
+    return () => { alive = false; };
   }, [recordId, session.source, session.sessionId]);
 
-  if (!rec) return <aside className="inspector empty-state">选择账本中的一条记录以查看详情</aside>;
+  const timing = useMemo(() => computeTiming(rec, step), [rec, step]);
+  const tools = rec?.siblings ?? [];
+  const isTool = rec?.kind === 'tool' || rec?.kind === 'subtool';
+  const turnId = turn?.source_turn_id;
+  const stepId = step?.source_step_id;
 
-  const encrypted = rec.flags.includes('reasoning-encrypted');
+  // Switching between a tool row and a prose row must not strand the panel on a tab
+  // that record kind does not have. This hook MUST stay above the early return below —
+  // a hook after a conditional return changes the hook order and React throws.
+  useEffect(() => { setTab('overview'); }, [rec?.recordId]);
+
+  if (!rec) {
+    return <aside className="inspector empty-state">选择账本中的一条记录以查看详情</aside>;
+  }
+
+  // Encrypted reasoning no longer produces its own record, so the flag may be absent:
+  // the authoritative signal is the step's declared availability.
+  const stepReasoning = parseJson<any>(step?.reasoning_json, null);
+  // A 推理 block carries its own thinking as content, so neither the flag nor the step's
+  // copy should raise an encryption notice on it.
+  const encrypted = rec.kind !== 'reasoning'
+    && (rec.flags.includes('reasoning-encrypted') || stepReasoning?.availability === 'encrypted');
+  const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }));
+  const sec = (key: string, title: string, extra?: React.ReactNode, children?: React.ReactNode) => (
+    <section className="insp-sec">
+      <button className="insp-sec-head" onClick={() => toggle(key)} aria-expanded={!!open[key]}>
+        <i className={'caret' + (open[key] ? ' open' : '')} />
+        <span>{title}</span>
+        {extra}
+      </button>
+      {open[key] && children}
+    </section>
+  );
 
   return (
     <aside className="inspector">
       <div className="insp-head">
-        <span className={'kind ' + rec.kind}>{rec.kind}</span>
-        <span className="idx">#{rec.orderIndex}</span>
-        {rec.toolName && <span className="badge">{rec.toolName}</span>}
-        {rec.callId && <span className="badge" title={rec.callId}>call {rec.callId.slice(0, 10)}</span>}
+        <span className={'kind ' + rec.kind}>{KIND_LABEL[rec.kind] ?? rec.kind}</span>
+        <span className="idx">
+          {rec.turnIndex != null && <>第 {turnNo(rec.turnIndex, turnId)} 轮</>}
+          {rec.stepIndex != null && <> · 第 {stepNo(rec.stepIndex, stepId)} 步</>}
+          {rec.turnIndex == null && rec.stepIndex == null && <>#{rec.orderIndex}</>}
+        </span>
         {rec.isError && <span className="badge err">错误</span>}
+        {rec.flags.length > 0 && <span className="badge warn">{rec.flags.length} 标记</span>}
         <span className="spacer" />
-        <span className="muted">{fmtDur(rec.timeSeconds)}</span>
+        <button className="insp-close" title="清除选择" onClick={() => window.dispatchEvent(new Event('trajview:clear-selection'))}>✕</button>
       </div>
 
-      <div className="kv">
-        {rec.startedAt && <><span>开始</span><code>{fmtTime(rec.startedAt)}</code></>}
-        <span>时长</span><code>{fmtDur(rec.timeSeconds)}</code>
-        {rec.sourceSeq && <><span>源序号</span><code>{rec.sourceSeq}</code></>}
+      {/* Both kinds open on 概述. Its content grows a kind-specific section (助手 gets a
+          预览, a tool gets 参数 + 结果) so the common facts stay on one screen. */}
+      <div className="tabs insp-tabs">
+        {isTool ? (
+          <>
+            <button className={tab === 'overview' ? 'on' : ''} onClick={() => setTab('overview')}>概述</button>
+            <button className={tab === 'input' ? 'on' : ''} onClick={() => setTab('input')}>参数</button>
+            <button className={tab === 'output' ? 'on' : ''} onClick={() => setTab('output')}>结果</button>
+            <button className={tab === 'schema' ? 'on' : ''} onClick={() => setTab('schema')}>Schema</button>
+            <button className={tab === 'timing' ? 'on' : ''} onClick={() => setTab('timing')}>计时</button>
+          </>
+        ) : (
+          <>
+            <button className={tab === 'overview' ? 'on' : ''} onClick={() => setTab('overview')}>概述</button>
+            <button className={tab === 'preview' ? 'on' : ''} onClick={() => setTab('preview')}>预览</button>
+            <button className={tab === 'raw' ? 'on' : ''} onClick={() => setTab('raw')}>原始内容</button>
+          </>
+        )}
       </div>
 
-      {rec.usage && (
-        <div className="usage">
-          <div className="usage-head">
-            usage · scope=<b>{rec.usage.scope}</b> · 缓存口径=<b>{rec.usage.cacheSemantics}</b>
-            {rec.usage.crossSourceComparable === false && <span className="warn" title="口径不同，不可与其它源直接相加">· 不可跨源相加</span>}
-          </div>
-          <div className="usage-grid">
-            <Metric label="输入" v={rec.usage.inputTokens} />
-            <Metric label="缓存读" v={rec.usage.cachedInputTokens} />
-            <Metric label="缓存写" v={rec.usage.cacheWriteInputTokens} />
-            <Metric label="输出" v={rec.usage.outputTokens} />
-            <Metric label="推理" v={rec.usage.reasoningTokens} />
-            <Metric label="合计" v={rec.usage.totalTokens} />
-          </div>
-        </div>
+      {tab === 'overview' && (
+        <>
+          {sec('source', '来源', rec.orderIndex != null ? <em className="muted">#{rec.orderIndex}</em> : undefined,
+            <div className="kv">
+              <span>类型</span><code>{KIND_LABEL[rec.kind] ?? rec.kind} · {rec.kind}</code>
+              {rec.toolName && <><span>工具</span><code>{rec.toolName}</code></>}
+              {rec.callId && <><span>callId</span><code>{rec.callId}</code></>}
+              {rec.sourceSeq != null && <><span>源序号</span><code>{rec.sourceSeq}</code></>}
+              {step?.model && <><span>模型</span><code>{step.model}</code></>}
+              <span>轮次/步</span><code>{rec.turnIndex ?? '—'} / {rec.stepIndex ?? '—'}</code>
+            </div>)}
+
+          {sec('state', '状态', undefined,
+            <div className="kv">
+              <span>状态</span><code className={stateClass(rec)}>{stateLabel(rec)}</code>
+              {step && <><span>边界</span><code>{step.boundary_confidence === 'explicit' ? '显式' : '推断'}</code></>}
+            </div>)}
+
+          {sec('token', 'Token', rec.usage ? <em className="muted">scope={rec.usage.scope}</em> : undefined,
+            rec.usage ? (
+              <>
+                <div className="usage-grid">
+                  <Metric label="输入" v={rec.usage.inputTokens} />
+                  <Metric label="缓存读" v={rec.usage.cachedInputTokens} />
+                  <Metric label="缓存写" v={rec.usage.cacheWriteInputTokens} />
+                  <Metric label="输出" v={rec.usage.outputTokens} />
+                  <Metric label="推理" v={rec.usage.reasoningTokens} />
+                  <Metric label="合计" v={rec.usage.totalTokens} />
+                </div>
+                <div className="kv tight">
+                  <span>缓存口径</span><code>{rec.usage.cacheSemantics}</code>
+                  {rec.usage.crossSourceComparable === false && (
+                    <><span>跨源</span><code className="warn">口径不同，不可与其它源相加</code></>
+                  )}
+                </div>
+              </>
+            ) : <div className="note">来源未记录 usage。</div>)}
+
+          {sec('timing', '请求计时', <em className="muted">取自 step</em>,
+            <div className="kv tight">
+              <span>开始时间</span><code>{timing.start}</code>
+              <span>总时长</span><code>{timing.total}</code>
+              <span>首 token 延迟</span><code>{timing.ttft}</code>
+              <span>生成</span><code>{timing.decode}</code>
+              <span>吞吐量</span><code>{timing.throughput}</code>
+            </div>)}
+
+          {/* Kind-specific tail: a tool surfaces what it was called with and what came
+              back; a message surfaces its own text. Both stay collapsible like the
+              sections above. */}
+          {isTool ? (
+            <>
+              {sec('arg', '参数', undefined,
+                rec.tool?.inputRaw
+                  ? <JsonTree text={rec.tool.inputRaw} />
+                  : <div className="note">来源未记录该调用的参数。</div>)}
+
+              {sec('ret', '结果', <em className="muted">{fmtDur(rec.timeSeconds)}</em>,
+                rec.tool?.outputText != null ? (
+                  <pre className={'code' + (rec.isError ? ' err-code' : '')}>{rec.tool.outputText}</pre>
+                ) : (
+                  <div className="note">
+                    {rec.flags.includes('unresolved-call')
+                      ? '该调用没有对应结果（孤儿 call，已保留未丢弃）。'
+                      : '来源未记录该调用的输出。'}
+                  </div>
+                ))}
+            </>
+          ) : (
+            sec('pv', '预览', <em className="muted">完整内容见「预览」标签</em>,
+              <PreviewBody rec={rec} step={step} tools={tools} encrypted={encrypted}
+                open={open} toggle={toggle} onSelect={onSelect} />)
+          )}
+        </>
       )}
 
-      {rec.flags.length > 0 && (
-        <div className="flags-detail">{rec.flags.map((f) => <span key={f} className="chip">{f}</span>)}</div>
+      {tab === 'preview' && <PreviewBody rec={rec} step={step} tools={tools} encrypted={encrypted} open={open} toggle={toggle} onSelect={onSelect} />}
+
+      {tab === 'raw' && (
+        <pre className="code tall raw">{rawJson(rec, step)}</pre>
       )}
 
-      {encrypted && (
+      {tab === 'input' && (
+        rec.tool?.inputRaw
+          ? <JsonTree text={rec.tool.inputRaw} />
+          : <div className="note">来源未记录该调用的参数。</div>
+      )}
+
+      {tab === 'output' && (
+        rec.tool?.outputText != null ? (
+          <pre className={'code tall' + (rec.isError ? ' err-code' : '')}>{rec.tool.outputText}</pre>
+        ) : (
+          <div className="note">
+            {rec.flags.includes('unresolved-call')
+              ? '该调用没有对应结果（孤儿 call，已保留未丢弃）。'
+              : '来源未记录该调用的输出。'}
+          </div>
+        )
+      )}
+
+      {tab === 'schema' && (
         <div className="note">
-          该源的思维链内容为加密存储，无法展示。这里只显示其存在性与字节数（见「输出」标签页）。
+          来源未记录工具 Schema。<br />
+          本工具日志只保存了名称与参数：
+          {rec.toolName ? <><br /><code>{rec.toolName}</code></> : null}
+          {rec.tool?.parentCallId != null && <><br />父调用 <code>{rec.tool.parentCallId}</code>（嵌套深度 {rec.tool.depth ?? 0}）</>}
+          {rec.tool?.depth ? <><br />嵌套深度 <code>{rec.tool.depth}</code></> : null}
         </div>
       )}
 
-      <div className="tabs">
-        <button className={tab === 'summary' ? 'on' : ''} onClick={() => setTab('summary')}>摘要</button>
-        <button className={tab === 'detail' ? 'on' : ''} onClick={() => setTab('detail')}>输出</button>
-      </div>
-
-      <pre className="code">
-        {tab === 'summary'
-          ? (rec.summary || '（空）')
-          : (rec.detail ?? rec.summary ?? '（无详情）')}
-      </pre>
+      {tab === 'timing' && (
+        <>
+          <div className="kv tight">
+            <span>开始时间</span><code>{rec.tool?.startedAt ? fmtMs(rec.tool.startedAt) : (rec.startedAt ? fmtMs(rec.startedAt) : '—')}</code>
+            <span>结束时间</span><code>{rec.tool?.endedAt ? fmtMs(rec.tool.endedAt) : '—'}</code>
+            <span>总时长</span><code>{fmtDur(rec.timeSeconds)}</code>
+          </div>
+          {rec.tool?.durationMs == null && (
+            <div className="note">来源未记录该调用的结束时间，因此时长不可得。</div>
+          )}
+          {rec.isError && <div className="note">该调用以错误结束。</div>}
+        </>
+      )}
     </aside>
+  );
+}
+
+/**
+ * 预览 = 思考（有则显示）+ 内容 + 工具调用。
+ *
+ * Rendered from one place and used twice — as the 概述 section and as the 预览 tab —
+ * so the two can never drift apart. 工具调用 is always listed: it is what the assistant
+ * DID, so folding it away only adds a click to the thing being inspected.
+ */
+function PreviewBody({ rec, step, tools, encrypted, open, toggle, onSelect }: {
+  rec: RecordRow;
+  step: StepRow | null;
+  tools: SiblingTool[];
+  encrypted: boolean;
+  open: Record<string, boolean>;
+  toggle: (k: string) => void;
+  onSelect?: (recordId: string) => void;
+}) {
+  // A Codex `Reasoning` item is its own 推理 block, laid out exactly like a 助手 row.
+  // Its text IS the thinking, so it is shown as the content directly — a 思考 collapse
+  // around it would be a box inside a box saying the same thing twice.
+  const isReasoning = rec.kind === 'reasoning';
+  const thinkText = reasoningText(step) ?? '';
+  const showThink = !isReasoning && (thinkText.trim().length > 0 || encrypted);
+  const body = rec.detail ?? rec.summary ?? '（无输出）';
+
+  return (
+    <div className="preview">
+      {showThink && (
+        <div className="think">
+          <button className="think-toggle" aria-expanded={!!open.thinking}
+            onClick={() => toggle('thinking')}>
+            <i className={'caret' + (open.thinking ? ' open' : '')} />
+            思考
+            {encrypted && <em className="muted">加密</em>}
+          </button>
+          {open.thinking && (
+            <div className="think-quote">
+              {encrypted
+                ? <span className="muted">该源的思维链内容为加密存储，无法展示。仅显示其存在性与字节数。</span>
+                : <Markdown text={thinkText} className="think-body" />}
+            </div>
+          )}
+        </div>
+      )}
+
+      <Markdown className="preview-body" text={body} />
+
+      <div className="calls">
+        <div className="calls-head static">
+          <span>工具调用</span>
+          <em className="muted">{tools.length}</em>
+        </div>
+        {tools.length > 0 ? (
+          <ul className="toolcalls">
+            {tools.map((t) => (
+              <li key={t.recordId} className={t.isError ? 'err' : ''}
+                onClick={() => onSelect?.(t.recordId)}>
+                <span className="tc-wrench">⚒</span>
+                <span className="tc-name">{t.toolName ?? t.kind}</span>
+                <span className="tc-args" title={t.summary}>{stripToolArgs(t.summary)}</span>
+                <span className="tc-dur">{fmtDur(t.timeSeconds)}</span>
+              </li>
+            ))}
+          </ul>
+        ) : <div className="note">该 step 没有工具调用。</div>}
+      </div>
+    </div>
   );
 }
 
@@ -77,4 +334,75 @@ function Metric({ label, v }: { label: string; v: number | null | undefined }) {
   return <div className={'metric' + (v === null || v === undefined ? ' unknown' : '')}>
     <span>{label}</span><b>{v === null || v === undefined ? '—' : v}</b>
   </div>;
+}
+
+function fmtMs(t: number): string {
+  const d = new Date(t);
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+
+function parseJson<T>(s: string | undefined, fallback: T): T {
+  if (!s) return fallback;
+  try { return JSON.parse(s) as T; } catch { return fallback; }
+}
+
+function reasoningText(step: StepRow | null): string | undefined {
+  const r = parseJson<any>(step?.reasoning_json, null);
+  return r?.text;
+}
+
+/** DSH shows `bash {"command":…` — the tool name is already a separate column there. */
+function stripToolArgs(summary: string): string {
+  const { args } = splitToolLabel(summary);
+  return args;
+}
+
+function stateLabel(rec: RecordRow): string {
+  if (rec.isError) return '错误';
+  if (rec.flags.includes('running')) return '进行中';
+  if (rec.flags.includes('partial')) return '未正常结束';
+  if (rec.flags.includes('unresolved-call')) return '调用无结果';
+  if (rec.flags.includes('unresolved-output')) return '结果无对应调用';
+  return '已完成';
+}
+function stateClass(rec: RecordRow): string {
+  if (rec.isError) return 'err';
+  if (rec.flags.includes('running') || rec.flags.includes('partial')) return 'warn';
+  return '';
+}
+
+/**
+ * Timing is a STEP property. A record only knows its own elapsed time, so anything not
+ * carried by the step stays "—" instead of being approximated from the record.
+ *
+ * The block's start is `step/start`, NOT the record's own timestamp: an assistant
+ * message lands when the response COMPLETES, so using its timestamp would show the end
+ * of the call as its beginning (e.g. 10:48:57.551 instead of 10:48:53.800).
+ */
+function computeTiming(rec: RecordRow | null, step: StepRow | null) {
+  const stepMs = step?.started_at != null && step?.ended_at != null
+    ? step.ended_at - step.started_at : null;
+  const total = stepMs ?? (rec?.timeSeconds != null ? rec.timeSeconds * 1000 : null);
+
+  const ttft = step?.ttft_ms ?? null;
+  const decode = step?.decode_ms ?? null;
+  const out = rec?.usage?.outputTokens;
+  const throughput = decode != null && decode > 0 && typeof out === 'number'
+    ? (out / (decode / 1000)).toFixed(1) + ' tok/s' : '—';
+
+  const startAt = step?.started_at ?? rec?.startedAt;
+
+  return {
+    start: startAt != null ? fmtMs(startAt) : '—',
+    total: total != null ? (total / 1000).toFixed(2) + ' 秒' : '—',
+    ttft: ttft != null ? (ttft / 1000).toFixed(2) + ' 秒' : '—',
+    decode: decode != null ? (decode / 1000).toFixed(2) + ' 秒' : '—',
+    throughput,
+  };
+}
+
+function rawJson(rec: RecordRow, step: StepRow | null): string {
+  return JSON.stringify({ record: rec, step }, null, 2);
 }

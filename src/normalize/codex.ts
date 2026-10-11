@@ -53,6 +53,8 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
   const steps: NormStep[] = [];
   const records: NormRecord[] = [];
   const toolByCallId = new Map<string, NormRecord>();
+  // Reasoning item ids already emitted, so the two Codex layers don't duplicate them.
+  const seenReasoning = new Set<string>();
   const usageByTurn = new Map<number, NormUsage>();
 
   let currentTurn = -1;
@@ -184,6 +186,30 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
           prevWasToolOutput = false;
           break;
         }
+        case 'item_completed': {
+          // The event_msg layer mirrors the protocol items for the UI. `Reasoning` is the
+          // second place the model's thinking is logged — `item.raw_content` there holds
+          // the same text as `response_item.content`. Read it so a rollout whose
+          // response_item layer is trimmed still shows its reasoning.
+          const item = payload.item;
+          if (item && typeof item === 'object' && item.type === 'Reasoning') {
+            const body = reasoningBody(item.raw_content ?? item.content);
+            // Mirror of the response_item handling below. The two layers share one `id`,
+            // so only emit when the protocol layer has not already produced this item —
+            // otherwise every reasoning block would appear twice.
+            const id = typeof item.id === 'string' ? item.id : undefined;
+            if (body && (!id || !seenReasoning.has(id))) {
+              if (id) seenReasoning.add(id);
+              records.push({
+                recordId: rid('rsn-ev:' + orderOf(p)), kind: 'reasoning', orderIndex: orderOf(p),
+                turnIndex: Math.max(currentTurn, 0), stepIndex: currentStep < 0 ? undefined : currentStep,
+                text: firstLine(body), detailText: body.trim(), timeSeconds: null,
+                startedAt: ts, flags: [],
+              });
+            }
+          }
+          break;
+        }
         case 'turn_aborted': {
           const t = Math.max(currentTurn, 0);
           if (turns[t]) { turns[t].endReason = payload.reason ?? 'interrupted'; turns[t].endedAt = ts; }
@@ -225,25 +251,51 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
         continue;
       }
       if (payload.type === 'reasoning') {
-        const t = Math.max(currentTurn, 0);
+        // Measured on this machine's rollouts (2026-09-29, 153 reasoning items):
+        //   summary            -> []      (always empty)
+        //   encrypted_content  -> ""      (always empty)
+        //   content            -> [{type:'reasoning_text', text:'…'}]   ← the real text
+        // so reading only `summary` reported every step as 'absent' and threw the
+        // reasoning away. `summary` is still read first for rollouts that do populate it.
         const enc = payload.encrypted_content;
         const summary = (payload.summary ?? []).map((s: any) => s.text ?? '').join('\n');
+        const body = reasoningBody(payload.content);
+        const text = [summary, body].filter(Boolean).join('\n');
         const bytes = typeof enc === 'string' ? enc.length : 0;
         const availability: 'plaintext' | 'encrypted' | 'absent' =
-          summary && !bytes ? 'plaintext' : bytes ? 'encrypted' : 'absent';
-        const flags: RecordFlag[] = availability === 'encrypted' ? ['reasoning-encrypted'] : [];
+          text && !bytes ? 'plaintext' : bytes ? 'encrypted' : 'absent';
         if (currentStep < 0) openStep(ts);
-        if (steps[currentStep]) {
-          steps[currentStep].reasoning = {
-            availability, text: availability === 'plaintext' ? summary : undefined,
-            bytes: bytes || undefined,
-          };
+        // Both Codex layers describe the same thinking: `response_item.content` and
+        // `event_msg item.raw_content`, sharing one `id`. Whichever arrives first wins —
+        // and it is not always the protocol layer: the event_msg mirror carries a LOWER
+        // ordinal (20 vs 21 in a measured rollout), so it usually lands here first.
+        const ridKey = typeof payload.id === 'string' ? payload.id : undefined;
+        const alreadySeen = ridKey !== undefined && seenReasoning.has(ridKey);
+        if (ridKey) seenReasoning.add(ridKey);
+        // Codex reasoning is its OWN assistant block in the ledger, NOT folded into the
+        // AgentMessage beside it. Measured order in a rollout:
+        //   AgentMessage → tool ×N → Reasoning → tool ×N → Reasoning → …
+        //
+        // Deliberately NOT stored on the step either: a step can hold several Reasoning
+        // items, and last-write-wins would then attribute the LAST one's text to EVERY
+        // message in the step — which is how an AgentMessage ended up displaying the
+        // thinking of the Reasoning block that came after it.
+        if (availability === 'plaintext' && text.trim() && !alreadySeen) {
+          records.push({
+            recordId: rid('rsn:' + orderOf(p)), kind: 'reasoning', orderIndex: orderOf(p),
+            turnIndex: Math.max(currentTurn, 0), stepIndex: currentStep < 0 ? undefined : currentStep,
+            text: firstLine(text), detailText: text.trim(), timeSeconds: null,
+            startedAt: ts, flags: [],
+          });
+        } else if (availability === 'encrypted' && !alreadySeen) {
+          // Keep the failure visible: the record exists but says only that it is sealed.
+          records.push({
+            recordId: rid('rsn:' + orderOf(p)), kind: 'reasoning', orderIndex: orderOf(p),
+            turnIndex: Math.max(currentTurn, 0), stepIndex: currentStep < 0 ? undefined : currentStep,
+            text: `思考内容已加密（${bytes} 字节），无法展示`,
+            timeSeconds: null, startedAt: ts, flags: ['reasoning-encrypted'],
+          });
         }
-        records.push({ recordId: rid('rsn' + orderOf(p)), kind: 'context', orderIndex: orderOf(p),
-          turnIndex: t, stepIndex: currentStep,
-          text: availability === 'plaintext' ? firstLine(summary) : 'reasoning (encrypted, ' + bytes + ' bytes)',
-          detailText: availability === 'plaintext' ? summary : undefined,
-          timeSeconds: null, startedAt: ts, flags });
         continue;
       }
       if (payload.type === 'function_call' || payload.type === 'custom_tool_call') {
@@ -315,4 +367,28 @@ function truncate(s: string, n: number): string {
   return t.length > n ? t.slice(0, n) + '\u2026' : t;
 }
 function safeJson(v: unknown): string { try { return JSON.stringify(v) ?? ''; } catch { return ''; } }
+
+/**
+ * Pull the readable text out of a Codex reasoning body.
+ *
+ * Two shapes appear in the wild:
+ *   [{type:'reasoning_text', text:'…'}]  (response_item.content)
+ *   ['…']                                 (event_msg item.raw_content)
+ * Anything unrecognised is returned as-is if it is already a string, else dropped.
+ */
+function reasoningBody(content: unknown): string {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const part of content) {
+    if (typeof part === 'string') parts.push(part);
+    else if (part && typeof part === 'object') {
+      const p = part as any;
+      const t = p.text ?? p.thinking ?? p.reasoning_text;
+      if (typeof t === 'string') parts.push(t);
+    }
+  }
+  return parts.filter(Boolean).join('\n');
+}
 function stringify(v: unknown): string { return typeof v === 'string' ? v : safeJson(v); }

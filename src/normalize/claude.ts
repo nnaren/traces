@@ -131,12 +131,9 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
       for (const b of blocks) {
         if (b.type === 'thinking') {
           const text2 = b.thinking ?? '';
-          if (text2) {
-            steps[stepIndex].reasoning = { availability: 'plaintext', text: text2 };
-            records.push({ recordId: rid('think' + order + '::' + records.length), kind: 'context',
-              orderIndex: order, turnIndex: t, stepIndex, text: firstLine(text2), detailText: text2,
-              timeSeconds: null, startedAt: ts, flags: [] });
-          }
+          // Stored on the step, not as a `context` row: thinking is model output and
+          // would otherwise land in the 输入 lane. The inspector reads it from there.
+          if (text2) steps[stepIndex].reasoning = { availability: 'plaintext', text: text2 };
         } else if (b.type === 'text') {
           text += (b.text ?? '') + '\n';
         }
@@ -144,6 +141,13 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
       if (text.trim()) {
         records.push({ recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
           stepIndex, text: firstLine(text), detailText: text.trim(), timeSeconds: null, startedAt: ts, flags: [] });
+      } else if (blocks.length > 0) {
+        // Tool-call-only assistant turns carry no text block; keep the row so the step
+        // isn't left with bare tool calls and nothing that produced them.
+        const hasToolCall = blocks.some((b: any) => b.type === 'tool_use' || b.type === 'tool-call');
+        records.push({ recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
+          stepIndex, text: hasToolCall ? '（仅工具调用）' : '（无内容）',
+          timeSeconds: null, startedAt: ts, flags: [] });
       }
 
       // usage is per-record: sum into the turn aggregate and keep the step copy

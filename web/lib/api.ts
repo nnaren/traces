@@ -17,11 +17,18 @@ export interface SessionRow {
   recordCount: number; turnCount: number; stepCount: number;
 }
 
+export interface ToolCall {
+  callId: string; name: string; inputRaw?: string; outputText?: string; isError?: boolean;
+  startedAt?: number; endedAt?: number; durationMs?: number | null;
+  parentCallId?: string; depth?: number; unresolved?: boolean;
+}
+
 export interface RecordRow {
   recordId: string; kind: string; orderIndex: number;
   turnIndex?: number; stepIndex?: number; sourceSeq?: string;
   startedAt?: number; timeSeconds: number | null;
   toolName?: string; callId?: string; isError: boolean;
+  tool?: ToolCall;
   usage: any; flags: string[]; summary: string; detail?: string | null;
   hasDetailBlob?: boolean;
 }
@@ -33,8 +40,35 @@ export interface TurnRow {
 }
 export interface StepRow {
   step_index: number; turn_index: number; boundary_confidence: string;
+  /** The step number as written by the source; restarts inside every turn for DSH. */
+  source_step_id?: string;
   started_at?: number; ended_at?: number; ttft_ms?: number | null; decode_ms?: number | null;
   model?: string; usage_json?: string; reasoning_json?: string;
+  /** Authoritative ledger position of the assistant row this step produced. */
+  anchorOrder?: number;
+}
+
+/** One record projected onto a timeline lane (DSH ui-trajectory three-lane scheme). */
+export interface TimelineSpan {
+  recordId: string; kind: string; orderIndex: number; turnIndex?: number; stepIndex?: number;
+  toolName?: string; startedAt?: number; timeSeconds: number | null;
+  isError: boolean; summary: string;
+  /**
+   * Present only on the model-output record that OWNS a completed model call: the step's
+   * window, TTFT and model. A source that logs timing per step (DSH) has no per-record
+   * duration, so the server lends the owning record its step's span — and only that one,
+   * so sibling records in the same step still render as start markers.
+   */
+  stepStartedAt?: number;
+  stepEndedAt?: number;
+  ttftMs?: number | null;
+  model?: string | null;
+}
+
+/** A tool call issued inside the same step as the inspected record. */
+export interface SiblingTool {
+  recordId: string; kind: string; toolName?: string; callId?: string;
+  isError: boolean; summary: string; timeSeconds: number | null; startedAt?: number;
 }
 
 const base = '';
@@ -56,9 +90,10 @@ export const api = {
       `/api/sessions/${source}/${encodeURIComponent(id)}/records?limit=${limit}` +
       (before === undefined ? '' : '&before=' + before)),
   record: (source: SourceId, id: string, rid: string) =>
-    get<RecordRow>(`/api/sessions/${source}/${encodeURIComponent(id)}/records/${encodeURIComponent(rid)}`),
+    get<RecordRow & { siblings: SiblingTool[] }>(
+      `/api/sessions/${source}/${encodeURIComponent(id)}/records/${encodeURIComponent(rid)}`),
   timeline: (source: SourceId, id: string) =>
-    get<{ turns: TurnRow[]; steps: StepRow[]; spans: any[] }>(
+    get<{ turns: TurnRow[]; steps: StepRow[]; spans: TimelineSpan[] }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}/timeline`),
   search: (q: string) => get<any[]>('/api/search?q=' + encodeURIComponent(q)),
 };
@@ -71,3 +106,24 @@ export const fmtDur = (s: number | null | undefined): string => {
   return m + 'm ' + Math.round(s % 60) + 's';
 };
 export const fmtTime = (ms?: number): string => (ms ? new Date(ms).toLocaleString() : '—');
+
+/**
+ * Split a tool row's summary into name and arguments, the way DSH renders them:
+ *
+ *   ours   bash({"command":"du -sh …"})
+ *   DSH    bash {"command":"du -sh …"}
+ *
+ * The parentheses are dropped and the object is always brace-wrapped, because that is
+ * what the arguments actually are — passing them as `({…})` reads like a call expression.
+ * Non-JSON payloads are wrapped too rather than left bare, so the colour break between
+ * name and arguments stays in one place.
+ */
+export function splitToolLabel(summary: string, toolName?: string): { name: string; args: string } {
+  const s = (summary ?? '').trim();
+  const open = s.indexOf('(');
+  if (open <= 0) return { name: toolName ?? s, args: '' };
+  const name = s.slice(0, open);
+  const inner = s.slice(open + 1, s.endsWith(')') ? s.length - 1 : undefined).trim();
+  if (!inner) return { name, args: '' };
+  return { name, args: inner.startsWith('{') && inner.endsWith('}') ? inner : `{${inner}}` };
+}

@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { api, fmtTime, type SessionRow, type SourceId } from './lib/api';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { api, fmtTime, type SessionRow, type SourceId, type RecordRow } from './lib/api';
 import { Ledger } from './components/Ledger';
 import { Inspector } from './components/Inspector';
 import { Timeline } from './components/Timeline';
+import { ThemeSwitcher } from './components/ThemeSwitcher';
 
 const SOURCES: Array<{ id: SourceId | 'all'; label: string }> = [
   { id: 'all', label: '全部' },
@@ -17,7 +18,13 @@ export function App() {
   const [filter, setFilter] = useState<SourceId | 'all'>('all');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState<SessionRow | null>(null);
-  const [selectedRecord, setSelectedRecord] = useState<string | null>(null);
+  const [selectedRecord, setSelectedRecord] = useState<RecordRow | null>(null);
+  // Set only by a timeline click, so the ledger scrolls there. Reusing `selectedRecord`
+  // for this would also fire on ordinary row clicks and yank the list under the cursor.
+  const [jumpTo, setJumpTo] = useState<string | null>(null);
+  // The panel is genuinely removed when closed, not left as an empty 420px column —
+  // the ledger reclaims the space (`.ledger` is flex:1, `.inspector` is flex:none).
+  const [inspOpen, setInspOpen] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -51,6 +58,36 @@ export function App() {
     if (next && location.hash !== next) history.replaceState(null, '', next);
   }, [sel]);
 
+  // The inspector's ✕ clears the selection; picking a listed tool call jumps to it.
+  useEffect(() => {
+    // The inspector's ✕ clears the selection AND collapses the panel.
+    const clear = () => { setSelectedRecord(null); setInspOpen(false); };
+    window.addEventListener('trajview:clear-selection', clear);
+    return () => window.removeEventListener('trajview:clear-selection', clear);
+  }, []);
+
+  // The ledger hands back whole records; a jump from the inspector only knows an id,
+  // so resolve it before storing.
+  const jumpToRecord = useCallback(async (recordId: string) => {
+    if (!sel) return;
+    const row = await api.record(sel.source, sel.sessionId, recordId).catch(() => null);
+    if (row) setSelectedRecord(row);
+  }, [sel]);
+
+  /** Timeline block → highlight it in the ledger and load it into the inspector. */
+  const onTimelineJump = useCallback((recordId: string) => {
+    setJumpTo(recordId);
+    setSelectedRecord(null);
+    setInspOpen(true);
+    void jumpToRecord(recordId);
+  }, [jumpToRecord]);
+
+  /** Picking a ledger row must (re)open the panel, however it was closed. */
+  const onLedgerSelect = useCallback((rec: RecordRow | null) => {
+    setSelectedRecord(rec);
+    if (rec) setInspOpen(true);
+  }, []);
+
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return sessions;
@@ -60,6 +97,7 @@ export function App() {
 
   return (
     <div className="app">
+      <ThemeSwitcher />
       <aside className="sidebar">
         <div className="brand">
           <span className="logo">◈</span>
@@ -128,10 +166,15 @@ export function App() {
                 <span>{fmtTime(sel.startedAt)}</span>
               </div>
             </header>
-            <Timeline source={sel.source} sessionId={sel.sessionId} />
+            <Timeline source={sel.source} sessionId={sel.sessionId} selected={selectedRecord}
+              onJump={onTimelineJump} />
             <div className="body-row">
-              <Ledger session={sel} selected={selectedRecord} onSelect={setSelectedRecord} />
-              <Inspector session={sel} recordId={selectedRecord} />
+              <Ledger session={sel} selected={selectedRecord?.recordId ?? null} onSelect={onLedgerSelect}
+                jumpTo={jumpTo} onJumpDone={() => setJumpTo(null)}
+                inspectorClosed={!inspOpen} onOpenInspector={() => setInspOpen(true)} />
+              {inspOpen && (
+                <Inspector session={sel} recordId={selectedRecord?.recordId ?? null} onSelect={jumpToRecord} />
+              )}
             </div>
           </>
         )}

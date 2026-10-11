@@ -64,7 +64,7 @@ export interface TrajectorySourceAdapter {
 }
 
 export type NormRecordKind =
-  | 'system' | 'user' | 'context' | 'compacted' | 'message'
+  | 'system' | 'user' | 'context' | 'compacted' | 'message' | 'reasoning'
   | 'tool' | 'subtool' | 'request-header' | 'turn-end' | 'session-end';
 
 export type RecordFlag =
@@ -102,6 +102,14 @@ export interface NormToolCall {
 export interface NormStep {
   stepIndex: number;
   turnIndex: number;
+  /**
+   * The step number AS WRITTEN BY THE SOURCE. DSH logs `step/start {turn, step}` with
+   * the step counter RESTARTING inside every turn (turn 1 → step 1..7, turn 2 → 1..3),
+   * whereas `stepIndex` is a flat per-session counter used for ordering. Sources that
+   * declare no numbering (Claude Code, Codex) leave this undefined and the UI shows the
+   * derived index instead of inventing a number.
+   */
+  sourceStepId?: string;
   boundaryConfidence: 'explicit' | 'derived';
   startedAt?: number;
   endedAt?: number;

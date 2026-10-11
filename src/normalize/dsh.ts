@@ -9,7 +9,7 @@
  *  - `assistant/message` carries plaintext reasoning chunks and per-record usage
  */
 import type {
-  Diagnostic, NormRecord, NormSession, NormStep, NormTurn, NormUsage, RecordFlag, SessionRef, RawLine,
+  Diagnostic, NormRecord, NormRecordKind, NormSession, NormStep, NormTurn, NormUsage, RecordFlag, SessionRef, RawLine,
 } from '../types.ts';
 import { DSH_CAPABILITIES } from '../sources/dsh.ts';
 import { parseLine } from '../sources/stableRead.ts';
@@ -126,9 +126,12 @@ export function normalizeDsh(
       crossSourceComparable: false });
     return currentTurn;
   };
-  const openStep = (key: string, ts?: number) => {
+  const openStep = (key: string, ts?: number, stepNum?: number) => {
     currentStep = steps.length;
     steps.push({ stepIndex: currentStep, turnIndex: Math.max(currentTurn, 0),
+      // DSH restarts its step counter inside every turn, so keep the source number
+      // verbatim instead of letting the flat `stepIndex` stand in for it.
+      sourceStepId: stepNum != null ? String(stepNum) : undefined,
       boundaryConfidence: 'explicit', startedAt: ts, ttftMs: null, decodeMs: null });
     stepByKey.set(key, currentStep);
     return currentStep;
@@ -176,7 +179,7 @@ export function normalizeDsh(
       }
       case 'step/start': {
         const key = data.turn + ':' + data.step;
-        openStep(key, ts);
+        openStep(key, ts, data.step);
         break;
       }
       case 'step/end': {
@@ -184,10 +187,14 @@ export function normalizeDsh(
         const idx = stepByKey.get(key) ?? Math.max(currentStep, 0);
         const step = steps[idx];
         if (step) {
-          step.endedAt = ts;
-          if (step.startedAt && ts) {
-            const total = ts - step.startedAt;
-            if (step.ttftMs != null) step.decodeMs = Math.max(0, total - step.ttftMs);
+          // Only a step that produced NO assistant message (tool-only) takes its end here.
+          // Otherwise the model-call end already sits at the assistant message.
+          if (step.endedAt == null) {
+            step.endedAt = ts;
+            if (step.startedAt && ts) {
+              const total = ts - step.startedAt;
+              if (step.ttftMs != null) step.decodeMs = Math.max(0, total - step.ttftMs);
+            }
           }
         }
         break;
@@ -196,9 +203,18 @@ export function normalizeDsh(
       case 'developer/message':
       case 'system/message': {
         const t = currentTurn < 0 ? openTurn(data.turn, ts) : currentTurn;
-        const text = messageText(data.message);
-        records.push({ recordId: rid(type + ':' + seq), kind: type === 'user/message' ? 'user' : 'context',
-          orderIndex: seq, turnIndex: t, stepIndex: currentStep, opensTurn: type === 'user/message',
+        // `system/message` and `assistant/message` nest the payload under `data.message`,
+        // but `user/message` carries `content`/`role`/`source` directly on `data`.
+        // Reading only `data.message` silently blanks every user turn.
+        const envelope = data.message ?? data;
+        const text = messageText(envelope);
+        const role = messageRole(envelope);
+        const kind = classifyMessage(type, role, data.source);
+        records.push({ recordId: rid(type + ':' + seq), kind,
+          orderIndex: seq, turnIndex: t, stepIndex: currentStep,
+          // Only a real user utterance opens a turn. Injected context arrives inside an
+          // already-open turn and must not fabricate a new one.
+          opensTurn: kind === 'user' && currentTurn < 0,
           text: firstLine(text), detailText: text, timeSeconds: null, startedAt: ts, flags: flagsFor(seq) });
         break;
       }
@@ -227,6 +243,14 @@ export function normalizeDsh(
         if (step) {
           if (ttft != null && step.ttftMs == null) step.ttftMs = Math.max(0, ttft - (step.startedAt ?? ttft));
           if (thinking) step.reasoning = { availability: 'plaintext', text: thinking.trim() };
+          // A model call ENDS when its assistant message completes — NOT at `step/end`.
+          // `step/end` fires only after every tool call in the step has settled, so using
+          // it here would fold tool wall time into 总时长 and 生成 (measured on this
+          // machine: one `du -sh` inside a step added 54s to a 3.75s model call).
+          if (step.startedAt != null && ts != null) {
+            step.endedAt = ts;
+            if (step.ttftMs != null) step.decodeMs = Math.max(0, (ts - step.startedAt) - step.ttftMs);
+          }
         }
         const usage: NormUsage | undefined = data.usage ? {
           inputTokens: data.usage.inputTokens, cachedInputTokens: data.usage.cacheReadTokens,
@@ -245,15 +269,25 @@ export function normalizeDsh(
             acc.totalTokens = (acc.totalTokens ?? 0) + (usage.totalTokens ?? 0);
           }
         } else diag.usageMissingCount++;
-        if (thinking) {
-          records.push({ recordId: rid('think:' + seq), kind: 'context', orderIndex: seq, turnIndex: t,
-            stepIndex: stepIdx, text: firstLine(thinking), detailText: thinking.trim(),
-            timeSeconds: null, startedAt: ts, flags: flagsFor(seq) });
-        }
+        // Reasoning is NOT emitted as its own ledger row: it belongs to the model's
+        // output, so a `context` row would drag assistant thinking into the 输入 lane.
+        // It stays on `step.reasoning` and surfaces in the inspector's 预览 → 思考,
+        // which is exactly where DSH shows it.
         if (text.trim()) {
           records.push({ recordId: rid('asst:' + seq), kind: 'message', orderIndex: seq, turnIndex: t,
             stepIndex: stepIdx, text: firstLine(text), detailText: text.trim(), timeSeconds: null,
             startedAt: ts, usage, flags: flagsFor(seq) });
+        } else if (blocks.length > 0) {
+          // An assistant message that only issued tool calls (or only reasoned) carries
+          // no `text` block. Dropping the row would leave its step looking empty — bare
+          // tool calls under a step with nothing that produced them. DSH keeps the row
+          // and labels it (`record.toolCallOnly`), so we do the same.
+          const hasToolCall = blocks.some((b: any) =>
+            b.type === 'tool-call' || b.type === 'tool_use' || b.type === 'function_call');
+          records.push({ recordId: rid('asst:' + seq), kind: 'message', orderIndex: seq, turnIndex: t,
+            stepIndex: stepIdx,
+            text: hasToolCall ? '（仅工具调用）' : thinking.trim() ? '（仅思考）' : '（无内容）',
+            timeSeconds: null, startedAt: ts, usage, flags: flagsFor(seq) });
         }
         break;
       }
@@ -395,6 +429,43 @@ function messageText(message: any): string {
   if (typeof message.text === 'string') return message.text;
   if (typeof message.thinking === 'string') return message.thinking;
   return safeJson(message);
+}
+
+/** `message.role` — DSH sets it explicitly ("user"/"system"/"assistant"/"tool"). */
+function messageRole(message: any): string | undefined {
+  if (message == null || typeof message !== 'object') return undefined;
+  return typeof message.role === 'string' ? message.role : undefined;
+}
+
+/**
+ * Map a DSH message event onto the normalized record kinds the UI shows as
+ * 系统 / 用户 / 上下文 / 助手 / 工具.
+ *
+ * DSH has NO dedicated context event. Everything the agent was fed but the human did
+ * not type arrives as `user/message` carrying `source.kind`, which is what actually
+ * distinguishes the two (measured on this machine's logs):
+ *
+ *   source.kind = "user"             → 用户   (a real utterance)
+ *   source.kind = "runtime-context"  → 上下文 (sandbox policy, runtime snapshot, …)
+ *   source.kind = "user-approval"    → 用户   (the user answering an approval prompt)
+ *   no source.kind but baseline/entries → 上下文 (AGENTS.md baseline, skill catalog, …)
+ *
+ * `system/message` is the system prompt → 系统, and `developer/message` is injected
+ * developer guidance → 上下文.
+ */
+function classifyMessage(type: string, role: string | undefined, source: any): NormRecordKind {
+  if (type === 'system/message') return 'system';
+  if (type === 'developer/message') return 'context';
+
+  const kind = source?.kind;
+  if (typeof kind === 'string') {
+    if (kind === 'user' || kind === 'user-approval') return 'user';
+    // Any other declared kind (runtime-context, queue, followup, …) is injected input.
+    if (kind !== 'assistant') return 'context';
+  }
+  // No declared kind: fall back on the message role, then treat it as injected input.
+  if (role === 'assistant') return 'message';
+  return 'context';
 }
 
 /** turn/end `reason` may be a string or a structured object. */

@@ -1,9 +1,52 @@
-:root{
+/*
+ * Theme tokens. Everything that needs to change with the theme is a variable here, so
+ * the switcher only has to set `data-theme` on <html>. Dark is the default (the app has
+ * always been dark); "system" leaves the attribute off and lets the media query decide.
+ */
+:root, [data-theme='dark']{
   --bg:#0d1117; --bg2:#161b22; --bg3:#1c2128; --line:#30363d;
   --fg:#e6edf3; --fg2:#8b949e; --fg3:#6e7681;
   --accent:#58a6ff; --codex:#7ee787; --claude:#d2a8ff; --dsh:#ffa657;
   --err:#f85149; --warn:#d29922;
+  --on-accent:#04121f;
+  --lane-user:#58a6ff; --lane-context:#3fb950; --lane-model:#a371f7; --lane-tool:#d29922;
+  /* 推理 badge. Kept as its own token (not --lane-model) so the badge can be tuned
+     without dragging the timeline's model lane along with it. */
+  --reasoning:#22d3ee;
+  --edge-turn:#3fb950; --edge-turn-end:#1f6f43; --edge-step:#8957e5; --edge-step-end:#5a3b91;
+  --jt-key:#ff7b72; --jt-str:#a5d6ff; --jt-num:#79c0ff; --jt-bool:#d2a8ff;
+  --tip-bg:#1c2128; --tip-fg:#e6edf3;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+[data-theme='light']{
+  --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eaeef2; --line:#d0d7de;
+  --fg:#1f2328; --fg2:#59636e; --fg3:#818b98;
+  --accent:#0969da; --codex:#1a7f37; --claude:#8250df; --dsh:#bc4c00;
+  --err:#cf222e; --warn:#9a6700;
+  --on-accent:#ffffff;
+  --lane-user:#0969da; --lane-context:#1a7f37; --lane-model:#8250df; --lane-tool:#9a6700;
+  --reasoning:#0e7490;
+  --edge-turn:#1a7f37; --edge-turn-end:#4ac26b; --edge-step:#8250df; --edge-step-end:#a371f7;
+  --jt-key:#cf222e; --jt-str:#0a3069; --jt-num:#0550ae; --jt-bool:#8250df;
+  --tip-bg:#24292f; --tip-fg:#ffffff;
+  color-scheme:light;
+}
+/* "系统" mode: no data-theme attribute, so follow the OS. */
+@media (prefers-color-scheme: light){
+  :root:not([data-theme='dark']){
+    --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eaeef2; --line:#d0d7de;
+    --fg:#1f2328; --fg2:#59636e; --fg3:#818b98;
+    --accent:#0969da; --codex:#1a7f37; --claude:#8250df; --dsh:#bc4c00;
+    --err:#cf222e; --warn:#9a6700;
+    --on-accent:#ffffff;
+    --lane-user:#0969da; --lane-context:#1a7f37; --lane-model:#8250df; --lane-tool:#9a6700;
+    --reasoning:#0e7490;
+    --edge-turn:#1a7f37; --edge-turn-end:#4ac26b; --edge-step:#8250df; --edge-step-end:#a371f7;
+    --jt-key:#cf222e; --jt-str:#0a3069; --jt-num:#0550ae; --jt-bool:#8250df;
+    --tip-bg:#24292f; --tip-fg:#ffffff;
+    color-scheme:light;
+  }
 }
 *{box-sizing:border-box}
 html,body,#root{height:100%;margin:0}
@@ -19,7 +62,7 @@ code,pre,.mono{font-family:var(--mono)}
 .brand-sub{color:var(--fg3);font-size:11px}
 .source-tabs{display:flex;gap:4px;padding:10px 10px 6px}
 .tab{flex:1;background:var(--bg3);border:1px solid var(--line);color:var(--fg2);border-radius:6px;padding:5px 4px;cursor:pointer;font-size:11px}
-.tab.on{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
 .tab em{display:block;font-style:normal;opacity:.7;font-size:10px}
 .search{margin:6px 10px 10px;padding:7px 9px;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--fg);font-size:12px}
 .session-list{flex:1;overflow:auto;padding:0 8px 12px}
@@ -35,9 +78,9 @@ code,pre,.mono{font-family:var(--mono)}
 
 /* ---------- pills ---------- */
 .pill{font-size:10px;padding:1px 6px;border-radius:99px;font-weight:600;white-space:nowrap}
-.pill.codex{background:rgba(126,231,135,.15);color:var(--codex)}
-.pill.claude-code{background:rgba(210,168,255,.15);color:var(--claude)}
-.pill.dsh{background:rgba(255,166,87,.15);color:var(--dsh)}
+.pill.codex{background:color-mix(in srgb,var(--codex) 15%,transparent);color:var(--codex)}
+.pill.claude-code{background:color-mix(in srgb,var(--claude) 15%,transparent);color:var(--claude)}
+.pill.dsh{background:color-mix(in srgb,var(--dsh) 15%,transparent);color:var(--dsh)}
 
 /* ---------- main ---------- */
 .main{display:flex;flex-direction:column;overflow:hidden;position:relative}
@@ -59,31 +102,87 @@ code,pre,.mono{font-family:var(--mono)}
 .cap.off{opacity:.45}
 .cap.warn{color:var(--warn);border-color:var(--warn)}
 
-/* ---------- timeline ---------- */
+/* ---------- timeline (DSH ui-trajectory three-lane scheme) ---------- */
 .timeline{border-bottom:1px solid var(--line);background:var(--bg2);padding:8px 18px 10px}
 .tl-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .tl-head h3{margin:0;font-size:13px}
 .spacer{flex:1}
+.tl-mode{background:var(--bg3);border:1px solid var(--line);color:var(--fg2);border-radius:5px;padding:2px 10px;cursor:pointer;font-size:11px}
+.tl-mode.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
 .link{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px}
-.tl-wrap{position:relative;overflow:hidden;cursor:crosshair;user-select:none}
-.tl-inner{position:relative;transition:width .1s}
-.tl-lane{display:flex;align-items:center;height:22px;margin-bottom:3px}
-.tl-lane-name{width:44px;flex:none;color:var(--fg3);font-size:10px;font-family:var(--mono)}
-.tl-lane-body{position:relative;flex:1;height:100%;background:var(--bg);border-radius:4px;overflow:hidden}
-.tl-bar{position:absolute;top:3px;height:16px;border-radius:3px;font-size:9px;line-height:16px;padding-left:4px;overflow:hidden;white-space:nowrap;cursor:pointer}
-.tl-bar.turn{background:rgba(88,166,255,.35);border:1px solid var(--accent)}
-.tl-bar.step{background:rgba(210,168,255,.28);border:1px solid #8957e5}
-.tl-bar.tool{background:rgba(126,231,135,.25);border:1px solid #3fb950}
-.tl-bar.err{background:rgba(248,81,73,.35);border-color:var(--err)}
-.tl-bar.open{border-style:dashed;background:transparent;min-width:3px}
-.tl-bar.derived{border-style:dotted}
-.tl-sel{position:absolute;top:0;bottom:0;background:rgba(88,166,255,.14);border-left:1px solid var(--accent);border-right:1px solid var(--accent);pointer-events:none}
-.tl-legend{display:flex;gap:14px;margin-top:6px;font-size:10px}
+
+/* 44px label column + fluid track, exactly like DSH's .plot grid. */
+.tl-plot{display:grid;grid-template-columns:44px minmax(0,1fr);height:50px;overflow:hidden;background:var(--bg);border-radius:4px}
+.tl-labels{position:relative;border-right:1px solid var(--line);color:var(--fg3);font:10px/1 var(--mono)}
+.tl-labels span{position:absolute;right:3px;display:flex;align-items:center;justify-content:flex-end;height:8px;text-align:right}
+.tl-labels span:nth-child(1){top:7px}
+.tl-labels span:nth-child(2){top:21px}
+.tl-labels span:nth-child(3){top:35px}
+
+/* overflow stays hidden on purpose: horizontal movement is the right-drag pan below,
+   implemented as a px offset, so no scrollbar bar appears under the lanes. */
+.tl-track{position:relative;overflow:hidden;cursor:crosshair;touch-action:none;user-select:none}
+.tl-track[data-panning='true']{cursor:grabbing}
+.tl-inner{position:relative;height:100%;transition:width .1s}
+
+/* Lane pitch is 14px and the first lane starts at 7px, matching DSH so a span
+   sits exactly on its label (labels at 7 / 21 / 35). The LANE picks the row;
+   the KIND picks the colour, exactly like DSH's [data-timeline-span] rules. */
+.tl-span{position:absolute;height:8px;min-width:2px;border-radius:1px;cursor:pointer;opacity:.82;
+  --bar:var(--fg3);--ttft:transparent;background:var(--bar)}
+.tl-span[data-lane='0']{top:7px}
+.tl-span[data-lane='1']{top:21px}
+.tl-span[data-lane='2']{top:35px}
+.tl-span[data-lane='0'][data-kind='system']{--bar:var(--fg3)}
+.tl-span[data-lane='0'][data-kind='user']{--bar:var(--accent)}
+.tl-span[data-lane='0'][data-kind='context'],
+.tl-span[data-lane='0'][data-kind='compacted']{--bar:var(--lane-context)}
+.tl-span[data-lane='1'][data-kind='message']{--bar:var(--lane-model)}
+.tl-span[data-lane='2'][data-kind='tool'],
+.tl-span[data-lane='2'][data-kind='subtool']{--bar:var(--warn)}
+/* No recorded end time → start marker only. Never a fabricated width. */
+.tl-span.start{min-width:3px;border-radius:2px;background:transparent;border:1px dashed var(--bar);opacity:.9}
+.tl-span.err{background:var(--err);border-color:var(--err);opacity:1}
+.tl-span:hover{z-index:1;opacity:1;box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--accent)}
+/* The span backing the selected ledger row — DSH's [data-current='true'] ring. */
+.tl-span.current{z-index:2;opacity:1;box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--accent)}
+.tl-tag{position:absolute;left:3px;top:0;line-height:8px;font:8px/8px var(--mono);color:var(--bg);font-style:normal;opacity:.75;pointer-events:none;overflow:hidden;white-space:nowrap}
+
+/* Boundary markers projected from the logged turn/start|end and step/start|end events.
+   Turn edges span the whole plot; step edges stay inside the model lane they belong to. */
+.tl-edge-mark{position:absolute;pointer-events:none;z-index:1}
+.tl-edge-turn{top:0;bottom:0;width:1px}
+.tl-edge-turn.is-start{background:var(--lane-context)}
+.tl-edge-turn.is-end{background:var(--edge-turn-end)}
+.tl-edge-turn.derived{background:repeating-linear-gradient(to bottom,var(--line) 0 3px,transparent 3px 6px)}
+.tl-edge-step{top:18px;height:14px;width:1px}
+.tl-edge-step.is-start{background:var(--edge-step)}
+.tl-edge-step.is-end{background:var(--edge-step-end)}
+.tl-edge-step.derived{background:repeating-linear-gradient(to bottom,var(--line) 0 2px,transparent 2px 4px)}
+
+.tl-selection{position:absolute;z-index:1;top:0;bottom:0;min-width:1px;pointer-events:none;
+  background:color-mix(in srgb,var(--accent) 12%,transparent);box-shadow:-100vw 0 0 100vw color-mix(in srgb,var(--bg) 50%,transparent),100vw 0 0 100vw color-mix(in srgb,var(--bg) 50%,transparent)}
+.tl-edge{position:absolute;top:0;bottom:0;width:3px;background:var(--accent)}
+.tl-edge.l{left:0}
+.tl-edge.r{right:0}
+
+.tl-legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:10px}
 .tl-legend i.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px;border:1px solid var(--line)}
-.sw.explicit{background:rgba(88,166,255,.5)}
-.sw.derived{background:transparent;border-style:dotted;border-color:var(--accent)}
-.sw.open{background:transparent;border-style:dashed}
-.tl-tip{position:fixed;background:#000;border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:11px;pointer-events:none;z-index:50;font-family:var(--mono);white-space:pre-line}
+.sw.user{background:var(--accent);border-color:var(--accent)}
+.sw.system{background:var(--fg3);border-color:var(--fg3)}
+.sw.context{background:var(--lane-context);border-color:var(--lane-context)}
+.sw.model{background:var(--lane-model);border-color:var(--lane-model)}
+.sw.tool{background:var(--warn);border-color:var(--warn)}
+.sw.start{background:transparent;border:1px dashed var(--fg3)}
+.sw.edge-ex{background:transparent;border:none;box-shadow:inset 2px 0 0 var(--lane-context)}
+.sw.edge-step{background:transparent;border:none;box-shadow:inset 2px 0 0 var(--edge-step)}
+.sw.edge-dv{background:transparent;border:none;box-shadow:inset 2px 0 0 var(--fg3)}
+/* An explicit `color` is load-bearing: without it the tip inherits the page's text
+   colour, which in the light theme is near-black on a dark surface — the text
+   disappears and the tooltip reads as a solid black block. */
+.tl-tip{position:fixed;background:var(--tip-bg);color:var(--tip-fg);border:1px solid var(--line);
+  border-radius:6px;padding:6px 9px;font-size:11px;line-height:1.45;pointer-events:none;z-index:50;
+  font-family:var(--mono);white-space:pre-line;box-shadow:0 4px 14px color-mix(in srgb,var(--bg) 45%,transparent)}
 .tl-selinfo{margin-top:4px;font-size:10px}
 
 /* ---------- ledger + inspector row ---------- */
@@ -96,54 +195,161 @@ code,pre,.mono{font-family:var(--mono)}
 .live{color:var(--codex);font-size:10px}
 .ledger-box{flex:1;overflow:auto;position:relative}
 .load-earlier{display:block;width:100%;padding:7px;background:var(--bg2);border:none;border-bottom:1px solid var(--line);color:var(--accent);cursor:pointer;font-size:11px}
-.row{display:flex;align-items:center;gap:8px;padding:0 18px;font-size:12px;border-bottom:1px solid rgba(48,54,61,.4);cursor:pointer}
+.row{display:flex;align-items:center;gap:8px;padding:0 18px;font-size:12px;border-bottom:1px solid var(--line);cursor:pointer}
 .row:hover{background:var(--bg2)}
-.row.active{background:rgba(88,166,255,.14);box-shadow:inset 2px 0 0 var(--accent)}
+.row.active{background:color-mix(in srgb,var(--accent) 14%,transparent);box-shadow:inset 2px 0 0 var(--accent)}
 .row.sep{cursor:default;background:var(--bg2);border-bottom:1px solid var(--line);border-top:1px solid var(--line)}
 .row.sep:hover{background:var(--bg2)}
 .sep-label{font-family:var(--mono);font-size:10px;color:var(--accent);font-weight:700}
-.row.sep.step .sep-label{color:#8957e5;margin-left:14px}
+.row.sep.step .sep-label{color:var(--edge-step);margin-left:14px}
 .sep-meta{color:var(--fg3);font-size:10px;font-family:var(--mono)}
-.row .kind{width:14px;text-align:center;color:var(--fg3)}
-.kind.user{color:var(--accent)}
-.kind.message{color:var(--fg)}
-.kind.tool{color:var(--codex)}
-.kind.context{color:var(--fg3)}
-.kind.compacted{color:var(--warn)}
-.kind.turn-end{color:var(--claude)}
+.row .kind{flex:none;width:52px;text-align:center;font-size:10px;font-weight:600;border-radius:3px;padding:1px 0;white-space:nowrap}
+.kind.system{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 15%,transparent)}
+.kind.user{color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.kind.context{color:var(--lane-context);background:color-mix(in srgb,var(--lane-context) 16%,transparent)}
+.kind.compacted{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+.kind.message{color:var(--claude);background:color-mix(in srgb,var(--claude) 16%,transparent)}
+/* 推理 = the model's thinking, a sibling of 助手 rather than another assistant row.
+   Cyan, kept clearly apart from 助手's lavender and the blue 用户 badge. */
+.kind.reasoning{color:var(--reasoning);background:color-mix(in srgb,var(--reasoning) 15%,transparent)}
+.kind.tool{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+.kind.subtool{color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}
+.kind.turn-end{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 10%,transparent)}
+.kind.session-end{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 10%,transparent)}
+.kind.request-header{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 12%,transparent)}
 .row .idx{width:44px;color:var(--fg3);font-family:var(--mono);font-size:10px;text-align:right;flex:none}
 .row .sum{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row.err .sum{color:var(--err)}
+/* DSH's tool row: name in the row's own colour, arguments picked out in the tool colour.
+   The space between them is part of the format — `bash {"cmd":…}`, not `bash({"cmd":…})`. */
+.row .tname{color:var(--fg)}
+.row .targs{color:var(--warn);margin-left:.4em}
 .row .tok{color:var(--fg3);font-family:var(--mono);font-size:10px;flex:none}
 .row .dur{width:66px;text-align:right;color:var(--fg3);font-family:var(--mono);font-size:10px;flex:none}
 .flags{display:flex;gap:2px;flex:none}
 .flags i{font-style:normal;font-size:10px;color:var(--warn)}
 
 /* ---------- inspector ---------- */
-.inspector{flex:none;width:420px;border-left:1px solid var(--line);background:var(--bg2);overflow:auto;padding:12px 18px}
+.inspector{flex:none;width:420px;border-left:1px solid var(--line);background:var(--bg2);overflow:auto;padding:0 18px 16px}
 @media (max-width:1100px){.inspector{width:340px}}
 .empty-state{display:flex;align-items:center;justify-content:center;color:var(--fg3);height:120px}
-.insp-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.insp-head{display:flex;align-items:center;gap:8px;padding:10px 0 8px;position:sticky;top:0;background:var(--bg2);z-index:2}
+.insp-head .kind{flex:none;width:auto;padding:1px 8px}
 .insp-head .idx{color:var(--fg3);font-family:var(--mono);font-size:11px}
-.kv{display:grid;grid-template-columns:70px 1fr;gap:2px 10px;font-size:11px;margin-bottom:10px}
+.insp-close{background:none;border:none;color:var(--fg3);cursor:pointer;font-size:13px;padding:2px 4px;line-height:1}
+.insp-close:hover{color:var(--fg)}
+.badge.warn{color:var(--warn);border-color:var(--warn)}
+
+.insp-tabs{position:sticky;top:40px;background:var(--bg2);z-index:2;padding-bottom:6px;margin-bottom:2px}
+.insp-tabs button{border-bottom:none}
+
+/* collapsible sections */
+.insp-sec{border-top:1px solid var(--line)}
+.insp-sec:last-of-type{border-bottom:1px solid var(--line)}
+.insp-sec-head{display:flex;align-items:center;gap:6px;width:100%;padding:8px 0;background:none;border:none;color:var(--fg2);cursor:pointer;font-size:12px;text-align:left}
+.insp-sec-head:hover{color:var(--fg)}
+.insp-sec-head em{margin-left:auto;font-style:normal;font-size:10px}
+.caret{flex:none;width:0;height:0;border-left:4px solid var(--fg3);border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;transition:transform .12s}
+.caret.open{transform:rotate(90deg) translateX(-1px)}
+.insp-sec .kv{padding-bottom:10px}
+
+.kv{display:grid;grid-template-columns:76px 1fr;gap:4px 10px;font-size:11px;margin-bottom:10px}
+.kv.tight{gap:2px 10px;margin-bottom:8px}
 .kv span{color:var(--fg3)}
-.kv code{color:var(--fg2)}
+.kv code{color:var(--fg2);word-break:break-all}
+.kv code.warn{color:var(--warn)}
 .usage{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin-bottom:10px}
 .usage-head{font-size:10px;color:var(--fg2);margin-bottom:6px}
 .usage-head b{color:var(--fg)}
 .usage-head .warn{color:var(--warn);margin-left:6px}
-.usage-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+.usage-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-bottom:8px}
 .metric{background:var(--bg3);border-radius:4px;padding:4px 6px;text-align:center}
 .metric span{display:block;color:var(--fg3);font-size:9px}
 .metric b{font-size:12px;font-family:var(--mono)}
 .metric.unknown b{color:var(--fg3)}
 .flags-detail{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:8px}
-.chip{background:rgba(210,153,34,.15);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:0 6px;font-size:10px}
-.note{background:rgba(88,166,255,.08);border-left:3px solid var(--accent);padding:7px 10px;font-size:11px;color:var(--fg2);margin-bottom:10px}
+.chip{background:color-mix(in srgb,var(--warn) 15%,transparent);color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:0 6px;font-size:10px}
+.note{background:color-mix(in srgb,var(--accent) 10%,transparent);border-left:3px solid var(--accent);padding:7px 10px;font-size:11px;color:var(--fg2);margin-bottom:10px;border-radius:0 4px 4px 0}
 .tabs{display:flex;gap:4px;margin-bottom:6px}
 .tabs button{background:var(--bg3);border:1px solid var(--line);color:var(--fg2);border-radius:5px;padding:3px 12px;cursor:pointer;font-size:11px}
-.tabs button.on{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
-.code{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:11px;margin:0;max-height:130px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg2)}
+.tabs button.on{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.code{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;font-size:11px;margin:0 0 10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;color:var(--fg2);font-family:var(--mono)}
+.code.tall{max-height:420px}
+.code.raw{font-size:10px;color:var(--fg3)}
+
+/* ---------- inspector: preview, DSH ui-trajectory style ---------- */
+.preview{padding:2px 0 10px}
+
+/* DSH .thinkingQuote: indented, 2px left rule, secondary label colour, no background. */
+.think{margin:6px 0 10px}
+.think-toggle,.calls-head{display:flex;align-items:center;gap:2px;width:max-content;height:18px;padding:0;border:0;background:none;color:var(--fg3);cursor:pointer;font:600 12px/18px inherit;user-select:none}
+.think-toggle:hover{color:var(--fg2)}
+/* Static header: 工具调用 is always visible, so no caret, no pointer. */
+.calls-head.static{cursor:default;width:auto;font-weight:600}
+.calls-head.static:hover{color:var(--fg3)}
+.think-toggle em,.calls-head em{font-style:normal;font-weight:400;margin-left:5px;font-size:11px;color:var(--fg3)}
+.think-quote{margin:6px 14px 8px 12px;padding-left:8px;border-left:2px solid var(--fg3);color:var(--fg2);background:transparent}
+
+/* DSH .markdownPreview typography (13px body, 8px rhythm, 600 headings). */
+.md{color:var(--fg);font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.md > :first-child{margin-top:0}
+.md > :last-child{margin-bottom:0}
+.md p{margin:8px 0}
+.md ul,.md ol{margin:8px 0;padding-left:20px}
+.md li:not(:first-child){margin-top:3px}
+.md h1{font-size:16px;font-weight:600;line-height:22px;margin:12px 0 6px}
+.md h2{font-size:15px;font-weight:600;line-height:22px;margin:12px 0 6px}
+.md :where(h3,h4,h5,h6){font-size:14px;font-weight:600;line-height:20px;margin:10px 0 5px}
+.md :not(pre) > code{font-family:var(--mono);font-size:12px;line-height:18px;background:var(--bg3);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--fg)}
+.md pre.md-code{margin:8px 0;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:9px 10px;overflow:auto;max-height:280px}
+.md pre.md-code code{font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--fg2);background:none;border:none;padding:0}
+.md blockquote{margin:8px 0;padding-left:8px;border-left:2px solid var(--line);color:var(--fg2)}
+.md hr{margin:14px 0;border:none;border-top:1px solid var(--line)}
+.md a{color:var(--accent);text-decoration:none}
+.md a:hover{text-decoration:underline}
+.md strong{font-weight:600}
+.preview-body{padding:2px 0 6px}
+
+/* tool calls issued by the inspected step */
+.calls{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+.toolcalls{list-style:none;margin:4px 0 0;padding:0}
+.toolcalls li{display:flex;align-items:center;gap:7px;padding:4px 6px;border-radius:5px;cursor:pointer;font-size:11px}
+.toolcalls li:hover{background:var(--bg3)}
+.toolcalls li.err{color:var(--err)}
+.tc-wrench{flex:none;color:var(--fg3);font-size:11px}
+.tc-name{flex:none;font-weight:600;font-family:var(--mono)}
+.tc-args{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2);font-family:var(--mono);font-size:10px}
+.tc-dur{flex:none;color:var(--fg3);font-family:var(--mono);font-size:10px}
 .muted{color:var(--fg3)}
 .err{color:var(--err)}
 .empty{padding:24px;color:var(--fg3);text-align:center;font-size:12px}
+.code.err-code{border-color:var(--err);color:var(--fg)}
+
+/* ---------- json tree (tool payloads) ---------- */
+.jt-root{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;
+  font:12px/17px var(--mono);max-height:420px;overflow:auto}
+.jt-row{display:flex;align-items:flex-start;gap:4px;padding:1px 0;border-radius:3px}
+.jt-branch{width:100%;background:none;border:none;color:var(--fg);cursor:pointer;text-align:left;font:inherit;padding:1px 0}
+.jt-branch:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.jt-indent{flex:none}
+.jt-caret{flex:none;width:0;height:0;margin-top:6px;border-left:4px solid var(--fg3);
+  border-top:3.5px solid transparent;border-bottom:3.5px solid transparent;transition:transform .12s}
+.jt-caret.open{transform:rotate(90deg) translateX(-1px)}
+.jt-key{color:var(--jt-key);flex:none}
+.jt-colon{color:var(--fg3);flex:none}
+.jt-str{color:var(--jt-str);white-space:pre-wrap;word-break:break-word;min-width:0}
+.jt-num{color:var(--jt-num)}
+.jt-bool{color:var(--claude)}
+.jt-null{color:var(--fg3);font-style:italic}
+.jt-size{color:var(--fg3);font-size:11px;flex:none}
+.jt-more{background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;font-family:inherit;padding:0 2px;flex:none}
+.jt-children{margin-left:13px;border-left:1px solid var(--line);padding-left:9px}
+.jt-empty{color:var(--fg3);font-size:11px;padding-left:13px}
+
+/* ---------- appearance switcher ---------- */
+.theme-switch{position:fixed;top:8px;right:12px;z-index:60;display:flex;gap:2px;padding:2px;
+  background:var(--bg2);border:1px solid var(--line);border-radius:7px}
+.theme-opt{background:none;border:none;border-radius:5px;padding:3px 10px;cursor:pointer;
+  color:var(--fg2);font-size:11px}
+.theme-opt:hover{background:var(--bg3);color:var(--fg)}
+.theme-opt.on{background:var(--accent);color:var(--on-accent);font-weight:600}

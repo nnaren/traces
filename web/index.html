@@ -4,6 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>trajview — 轨迹观察台</title>
+    <!--
+      Apply the saved appearance BEFORE first paint. Without this the app renders once
+      in the default dark theme and then flips after React mounts — a visible flash on
+      every reload for anyone who chose light or follows a light OS.
+    -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('trajview.theme');
+          if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+        } catch (e) { /* private mode / storage disabled — fall back to the default */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

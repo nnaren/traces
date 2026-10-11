@@ -14,7 +14,8 @@
     "build:web": "vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "audit:vault": "tsx scripts/audit-vault-dupes.ts"
+    "audit:vault": "tsx scripts/audit-vault-dupes.ts",
+    "dump:dsh": "tsx scripts/dsh-dump.ts"
   },
   "dependencies": {
     "react": "^18.3.1",

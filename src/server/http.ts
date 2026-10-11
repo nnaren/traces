@@ -18,6 +18,26 @@ const MIME: Record<string, string> = {
   '.svg': 'image/svg+xml', '.map': 'application/json',
 };
 
+/**
+ * Record kinds that carry a wall-clock position and can therefore enter a timeline lane.
+ *   输入 lane — system / user / context / compacted (what the agent was fed)
+ *   模型 lane — message / reasoning (the model's own output)
+ *   工具 lane — tool / subtool (tool processing)
+ *
+ * The 模型 lane is RECORD-based, matching DSH (whose model lane is its assistant message
+ * spans). Each 助手 / 推理 row gets its own block, so a click in the ledger rings exactly
+ * one block. Timing the source only records at step level is carried onto the record by
+ * `withStepTiming` below, so DSH keeps its duration bars and TTFT gradient.
+ *
+ * `turn-end` / `session-end` are boundaries, drawn as turn edges, not spans.
+ * `request-header` is a protocol artifact with no user- or tool-visible span.
+ */
+const TIMELINE_KINDS = new Set([
+  'system', 'user', 'context', 'compacted',
+  'message', 'reasoning',
+  'tool', 'subtool',
+]);
+
 export function startServer(opts: { dataDir: string; port: number; host?: string }) {
   return Store.open(opts.dataDir).then((store) => {
     const server = createServer((req, res) => { void handle(req, res, store); });
@@ -67,26 +87,99 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store) {
       if (sub === '/timeline') {
         const limit = Number(url.searchParams.get('limit') ?? 4000);
         const rows = store.getPage(source, id, undefined, limit);
-        return json(res, {
-          turns: store.getTurns(source, id),
-          steps: store.getSteps(source, id),
-          spans: rows.filter((r: any) => r.kind === 'tool' || r.kind === 'turn-end').map((r: any) => ({
-            recordId: r.record_id, kind: r.kind, turnIndex: r.turn_index, stepIndex: r.step_index,
-            toolName: r.tool_name, startedAt: r.started_at, timeSeconds: r.time_seconds, isError: r.is_error === 1,
-          })),
-        });
+        // Three-lane overview (DSH ui-trajectory scheme): every record that carries a
+        // timestamp can enter a lane. The client assigns lanes by kind, so the server
+        // hands over the whole plottable set rather than pre-filtering one kind.
+        const steps = withStepAnchors(store.getSteps(source, id), rows);
+        // A record carries a position; only a step carries a DURATION. Hand the model
+        // output records their step's timing so the 模型 lane keeps real bars (and TTFT)
+        // on sources that log step boundaries, without the lane having to be step-based.
+        const stepByKey = new Map<string, any>();
+        for (const s of steps) stepByKey.set(`${s.turn_index}:${s.step_index}`, s);
+
+        const spans = rows
+          .filter((r: any) => r.started_at != null && TIMELINE_KINDS.has(r.kind))
+          .map((r: any) => {
+            const step = r.kind === 'message' || r.kind === 'reasoning'
+              ? stepByKey.get(`${r.turn_index}:${r.step_index}`) : undefined;
+            // The step's span belongs to the record that ANCHORS it; other records in the
+            // same step keep their own start marker rather than all sharing one duration.
+            const owns = step?.anchorOrder != null && step.anchorOrder === r.order_index;
+            const hasStepSpan = owns && step.started_at != null && step.ended_at != null
+              && step.ended_at > step.started_at;
+            return {
+              recordId: r.record_id, kind: r.kind, orderIndex: r.order_index,
+              turnIndex: r.turn_index, stepIndex: r.step_index,
+              toolName: r.tool_name, startedAt: r.started_at, timeSeconds: r.time_seconds,
+              isError: r.is_error === 1, summary: r.summary ?? '',
+              // Present only when this record owns a completed model call.
+              ...(hasStepSpan ? {
+                stepStartedAt: step.started_at,
+                stepEndedAt: step.ended_at,
+                ttftMs: step.ttft_ms ?? null,
+                model: step.model ?? null,
+              } : {}),
+            };
+          });
+        return json(res, { turns: store.getTurns(source, id), steps, spans });
       }
       const rm = sub.match(/^\/records\/(.+)$/);
       if (rm) {
         const row = store.getRecord(source, id, decodeURIComponent(rm[1]));
         if (!row) return json(res, { error: 'not found' }, 404);
-        return json(res, { ...shapeRecord(row), detail: store.recordDetail(row) ?? null });
+        return json(res, {
+          ...shapeRecord(row),
+          detail: store.recordDetail(row) ?? null,
+          // The tool calls THIS record owns — bounded by the next assistant record, not
+          // by the step. Codex alternates AgentMessage / Reasoning blocks and each owns
+          // only the tools that follow it.
+          siblings: row.turn_index != null && row.step_index != null
+            ? store.getOwnedToolCalls(source, id, row)
+              .map((s: any) => ({
+                recordId: s.record_id, kind: s.kind, toolName: s.tool_name,
+                callId: s.call_id, isError: s.is_error === 1, summary: s.summary,
+                timeSeconds: s.time_seconds, startedAt: s.started_at,
+              }))
+            : [],
+        });
       }
     }
     return serveStatic(p, res);
   } catch (err) {
     return json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
   }
+}
+
+/**
+ * Attach each step's authoritative position to the step row.
+ *
+ * A step is not a ledger row, but the 模型 lane must line up with the 助手 row that
+ * produced it. That row is a `message`, which is deliberately absent from `spans` (the
+ * step itself draws that lane), so the anchor cannot be derived client-side from the
+ * span list. We resolve it here from the full record set and fall back to the step's
+ * earliest record so a step with no assistant output still lands in a sensible place.
+ */
+function withStepAnchors(steps: any[], rows: any[]): any[] {
+  const anchor = new Map<string, number>();
+  for (const r of rows) {
+    if (r.turn_index == null || r.step_index == null) continue;
+    const k = `${r.turn_index}:${r.step_index}`;
+    const cur = anchor.get(k);
+    if (cur === undefined || r.order_index < cur) anchor.set(k, r.order_index);
+  }
+  // Prefer the assistant record itself; only fall back to the earliest record otherwise.
+  const msgAnchor = new Map<string, number>();
+  for (const r of rows) {
+    if ((r.kind !== 'message' && r.kind !== 'reasoning') || r.turn_index == null || r.step_index == null) continue;
+    const k = `${r.turn_index}:${r.step_index}`;
+    const cur = msgAnchor.get(k);
+    if (cur === undefined || r.order_index < cur) msgAnchor.set(k, r.order_index);
+  }
+  return steps.map((s) => ({
+    ...s,
+    anchorOrder: msgAnchor.get(`${s.turn_index}:${s.step_index}`)
+      ?? anchor.get(`${s.turn_index}:${s.step_index}`),
+  }));
 }
 
 function shapeSession(r: any) {
@@ -103,6 +196,9 @@ function shapeRecord(r: any) {
     turnIndex: r.turn_index, stepIndex: r.step_index, sourceSeq: r.source_seq,
     startedAt: r.started_at, timeSeconds: r.time_seconds,
     toolName: r.tool_name, callId: r.call_id, isError: r.is_error === 1,
+    // NormToolCall, kept whole so the inspector can show 参数 and 结果 separately
+    // instead of the concatenated detail_text, and can expose sub-tool nesting.
+    tool: safeParse(r.tool_json, undefined),
     usage: safeParse(r.usage_json, null), flags: safeParse(r.flags_json, []),
     summary: r.summary, hasDetailBlob: !!r.detail_blob,
   };
