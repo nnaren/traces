@@ -75,6 +75,7 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
   const timing = useMemo(() => computeTiming(rec, step), [rec, step]);
   const tools = rec?.siblings ?? [];
   const isTool = rec?.kind === 'tool' || rec?.kind === 'subtool';
+  const isHook = rec?.kind === 'hook';
   const turnId = turn?.source_turn_id;
   const stepId = step?.source_step_id;
 
@@ -212,6 +213,8 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
                   </div>
                 ))}
             </>
+          ) : isHook ? (
+            sec('hk', '钩子注入', undefined, renderHook(rec))
           ) : (
             sec('pv', '预览', <em className="muted">完整内容见「预览」标签</em>,
               <PreviewBody rec={rec} step={step} tools={tools} encrypted={encrypted}
@@ -420,8 +423,41 @@ function renderArgs(rec: RecordRow) {
   return <div className="note">来源未记录该调用的参数。</div>;
 }
 
+/**
+ * The hook panel.
+ *
+ * A hook's own execution is invisible to the transcript — the script runs inside Codex and
+ * never reaches the rollout, and every measured record has `started_at_ms ===
+ * completed_at_ms`, so there is no duration to show. What IS knowable is: which lifecycle
+ * event spoke, which hooks.json declared it, the text it injected, and what the model did
+ * about it. Stating that boundary up front keeps the record from reading as "the hook ran
+ * this tool".
+ */
+function renderHook(rec: RecordRow) {
+  const h = rec.hook ?? {};
+  return (
+    <>
+      <div className="hook-meta">
+        {h.eventName && <span className="badge">事件 {h.eventName}</span>}
+        {h.handlerIndex != null && <span className="badge">处理器 #{h.handlerIndex}</span>}
+        {h.configPath && <code className="hook-cfg" title={h.configPath}>{h.configPath}</code>}
+      </div>
+      <div className="note">
+        钩子脚本自身的执行不在轨迹中记录（由 Codex 内部调用），此处仅是它
+        <strong>注入对话的文本</strong>。
+        {h.triggeredCallId
+          ? <>模型读到后紧接着发起了首个工具调用（账本中带 <span className="hook-link">↳</span> 标记）。</>
+          : <>本轮没有观察到紧随其后的工具调用。</>}
+      </div>
+      <pre className="code tall">{h.text || rec.detail || '（无注入文本）'}</pre>
+    </>
+  );
+}
+
 function stateLabel(rec: RecordRow): string {
   if (rec.isError) return '错误';
+  if (rec.flags.includes('hook-triggered')) return '钩子响应';
+  if (rec.kind === 'hook') return '钩子注入';
   if (rec.flags.includes('missing-arguments')) return '参数缺失';
   if (rec.flags.includes('running')) return '进行中';
   if (rec.flags.includes('partial')) return '未正常结束';

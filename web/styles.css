@@ -321,6 +321,13 @@ code,pre,.mono{font-family:var(--mono)}
 .kind.reasoning{color:var(--reasoning);background:color-mix(in srgb,var(--reasoning) 15%,transparent)}
 .kind.tool{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
 .kind.subtool{color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}
+/* Hook: an external rule speaking to the model. Distinct from 用户输入 — the user did not
+   write this, and the trajectory only ever shows its text, never its execution. */
+.kind.hook{color:var(--lane-context);background:color-mix(in srgb,var(--lane-context) 22%,transparent)}
+.hook-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.hook-cfg{font-size:10px;color:var(--fg3);overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;max-width:100%}
+.hook-link{color:var(--lane-context);font-weight:700}
 .kind.turn-end{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 10%,transparent)}
 .kind.session-end{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 10%,transparent)}
 .kind.request-header{color:var(--fg3);background:color-mix(in srgb,var(--fg3) 12%,transparent)}

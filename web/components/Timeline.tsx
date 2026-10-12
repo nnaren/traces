@@ -39,6 +39,10 @@ type LaneIndex = 0 | 1 | 2;
 function laneFor(kind: string): LaneIndex {
   if (kind === 'tool' || kind === 'subtool') return 2;
   if (kind === 'message' || kind === 'reasoning') return 1;
+  // A hook injection is neither the user's input nor the model's output: an external rule
+  // spoke between them. 输入 is the honest lane — it is what the model was fed, and what it
+  // then reacted to.
+  if (kind === 'hook') return 0;
   return 0;
 }
 

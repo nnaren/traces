@@ -412,6 +412,7 @@ function kindLabel(k: string): string {
     case 'reasoning': return '推理';
     case 'tool': return '工具';
     case 'subtool': return '子工具';
+    case 'hook': return '钩子';
     case 'request-header': return '请求头';
     case 'turn-end': return '轮次结束';
     case 'session-end': return '会话结束';
@@ -428,6 +429,7 @@ function kindTitle(k: string): string {
     reasoning: '推理内容（模型的思考过程，Codex 中与助手消息分离记录）',
     tool: '工具处理',
     subtool: '子工具处理（嵌套调用）',
+    hook: '钩子注入（生命周期钩子向对话写入的文本；钩子脚本自身的执行不在轨迹中）',
     'request-header': '请求头',
     'turn-end': '轮次结束标记',
     'session-end': '会话结束标记',
@@ -436,6 +438,8 @@ function kindTitle(k: string): string {
 }
 function flagIcon(f: string): string {
   if (f === 'unresolved-call' || f === 'unresolved-output') return '⚠';
+  if (f === 'hook-injected') return '⚓';
+  if (f === 'hook-triggered') return '↳';
   if (f === 'missing-arguments') return '⚡';
   if (f === 'reasoning-encrypted') return '🔒';
   if (f === 'partial' || f === 'running') return '◌';
@@ -448,6 +452,8 @@ function flagTitle(f: string): string {
     'unresolved-call': '工具调用没有结果（孤儿 call，已保留未丢弃）',
     'unresolved-output': '工具结果没有对应调用（孤儿 output）',
     'missing-arguments': '上游未产出该调用的参数，且工具层报参数解析失败（参数已丢失，不可恢复）',
+    'hook-injected': '生命周期钩子向对话注入了文本（钩子脚本自身的执行不留痕）',
+    'hook-triggered': '这是模型对上一条钩子注入的首次工具响应',
     'reasoning-encrypted': '思维链已加密，无法展示内容',
     partial: '未正常结束', running: '进行中', shadowed: '被 surfaceOp.replace 遮蔽（仍保留）',
     'usage-missing': '来源未记录 usage', 'ttft-missing': '来源未记录 TTFT',

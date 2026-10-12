@@ -261,4 +261,121 @@ describe('codex normalization', () => {
       expect(tool.flags).not.toContain('missing-arguments');
     });
   });
+
+  /**
+   * Lifecycle hooks (`HookPrompt`).
+   *
+   * The transcript only ever records the hook's TEXT INJECTION — the script runs inside
+   * Codex and never reaches the rollout, and every measured record has
+   * `started_at_ms === completed_at_ms`, so there is no execution to report. These tests pin
+   * both what is knowable (which event, which hooks.json, what was said) and what is not
+   * (the hook itself calls no tools — any tool link is the MODEL reacting).
+   */
+  describe('hook injections (HookPrompt)', () => {
+    const hook = (ord: number, text: string, runId = 'stop:6:/home/u/.codex/hooks.json') => ({
+      type: 'event_msg', ordinal: ord, timestamp: '2026-08-20T10:00:02.400Z',
+      payload: { type: 'item_completed', thread_id: 's1', turn_id: 't1',
+        item: { type: 'HookPrompt', id: 'msg_h' + ord, fragments: [{ text, hookRunId: runId }] } },
+    });
+    const callNamed = (id: string, ord: number, name: string, args: string) => ({
+      type: 'response_item', ordinal: ord, timestamp: '2026-08-20T10:00:03.000Z',
+      payload: { type: 'function_call', call_id: id, name, arguments: args },
+    });
+
+    it('emits a hook record carrying the parsed hookRunId and the injected text', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'OMX Ralph is still active; continue the task.'),
+        complete('t1', 4, 10)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h).toBeTruthy();
+      expect(h.hook!.eventName).toBe('stop');
+      expect(h.hook!.handlerIndex).toBe(6);
+      expect(h.hook!.configPath).toBe('/home/u/.codex/hooks.json');
+      expect(h.hook!.text).toBe('OMX Ralph is still active; continue the task.');
+      expect(h.flags).toContain('hook-injected');
+      expect(h.text).toContain('stop 钩子注入');
+    });
+
+    /**
+     * The whole value of the feature: a hook's effect is only visible as what the MODEL did
+     * next. Without this link the record is just a wall of injected prose.
+     */
+    it('links the hook to the first tool call the model issued after it', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'call get_goal then checkpoint'),
+        callNamed('k1', 4, 'get_goal', '{}'), output('k1', 5),
+        complete('t1', 6, 10)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h.hook!.triggeredCallId).toBe('k1');
+      expect(s.records.find((r) => r.callId === 'k1')!.flags).toContain('hook-triggered');
+    });
+
+    /**
+     * A `Stop` hook fires at turn end, so its reaction legitimately lands in the NEXT turn.
+     * Matching only within the hook's own turn found 21 of 107 injections; scanning forward
+     * finds 17, and the 4 it drops are the mis-attributions below — so turn boundaries must
+     * NOT stop the scan.
+     */
+    it('links across a turn boundary when the model continued on its own', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2), hook(3, 'keep going'),
+        complete('t1', 4, 10),
+        started('t2'), asstMsg('continuing', 5),
+        callNamed('k2', 6, 'exec_command', '{"cmd":"ls"}'), output('k2', 7),
+        complete('t2', 8, 20)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h.hook!.triggeredCallId).toBe('k2');
+      expect(s.records.find((r) => r.callId === 'k2')!.flags).toContain('hook-triggered');
+    });
+
+    // The correction that matters: 89 of 107 measured injections are followed by a user
+    // message BEFORE any tool call. That call is the human's, and crediting the hook would
+    // be inventing a causal link.
+    it('does NOT link when a new user message comes first', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2), hook(3, 'do X'),
+        complete('t1', 4, 10),
+        started('t2'), userMsg('actually, do Y', 6),
+        callNamed('k2', 7, 'exec_command', '{"cmd":"ls"}'), output('k2', 8),
+        complete('t2', 9, 20)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h.hook!.triggeredCallId).toBeUndefined();
+      expect(s.records.find((r) => r.callId === 'k2')!.flags).not.toContain('hook-triggered');
+    });
+
+    // When two injections stack, the later one owns whatever follows — linking the earlier
+    // hook to it would double-count a single reaction.
+    it('does NOT link past another hook injection', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'first'), hook(4, 'second'),
+        callNamed('k1', 5, 'get_goal', '{}'), output('k1', 6),
+        complete('t1', 7, 10)]);
+      const hooks = s.records.filter((r) => r.kind === 'hook');
+      expect(hooks[0].hook!.triggeredCallId).toBeUndefined();
+      expect(hooks[1].hook!.triggeredCallId).toBe('k1');
+    });
+
+    it('leaves triggeredCallId unset when the model issued no tool afterwards', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'just a note'), complete('t1', 4, 10)]);
+      expect(s.records.find((r) => r.kind === 'hook')!.hook!.triggeredCallId).toBeUndefined();
+    });
+
+    it('still emits the record when the runId is absent or malformed', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'text only', ''), complete('t1', 4, 10)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h).toBeTruthy();
+      expect(h.hook!.eventName).toBeUndefined();
+      expect(h.hook!.text).toBe('text only');
+    });
+
+    // Guards the distinction the whole feature rests on: a hook injects text, it does not
+    // run tools. Rendering it as a tool call would invent an execution that never happened.
+    it('never marks the hook itself as calling a tool', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        hook(3, 'run this script'), complete('t1', 4, 10)]);
+      const h = s.records.find((r) => r.kind === 'hook')!;
+      expect(h.tool).toBeUndefined();
+      expect(h.callId).toBeUndefined();
+    });
+  });
 });

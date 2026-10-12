@@ -27,12 +27,20 @@ export interface ToolCall {
   parentCallId?: string; depth?: number; unresolved?: boolean;
 }
 
+export interface HookInjection {
+  /** Lifecycle event from `hookRunId`, e.g. `stop`. */
+  eventName?: string; handlerIndex?: number; configPath?: string; text?: string;
+  /** The first tool call the model issued after reading this injection. */
+  triggeredCallId?: string;
+}
+
 export interface RecordRow {
   recordId: string; kind: string; orderIndex: number;
   turnIndex?: number; stepIndex?: number; sourceSeq?: string;
   startedAt?: number; timeSeconds: number | null;
   toolName?: string; callId?: string; isError: boolean;
   tool?: ToolCall;
+  hook?: HookInjection;
   usage: any; flags: string[]; summary: string; detail?: string | null;
   hasDetailBlob?: boolean;
 }

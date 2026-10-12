@@ -130,6 +130,7 @@ export class Store {
         started_at INTEGER, time_seconds REAL,
         tool_name TEXT, call_id TEXT, is_error INTEGER,
         tool_json TEXT,
+        hook_json TEXT,
         usage_json TEXT, flags_json TEXT,
         summary TEXT, detail_text TEXT, detail_blob TEXT,
         PRIMARY KEY (source, session_id, record_id)
@@ -159,6 +160,12 @@ export class Store {
     }
     if (!cols('records').includes('tool_json')) {
       this.db.exec('ALTER TABLE records ADD COLUMN tool_json TEXT');
+    }
+    // Hook metadata (event name, handler index, config path, the tool call the injection
+    // led to). Kept beside `tool_json` rather than folded into `detail_text`, because the
+    // UI links a hook to the tool record it triggered — that link is structure, not prose.
+    if (!cols('records').includes('hook_json')) {
+      this.db.exec('ALTER TABLE records ADD COLUMN hook_json TEXT');
     }
   }
 
@@ -241,8 +248,8 @@ export class Store {
 
       const insRec = this.db.prepare(`INSERT INTO records (source,session_id,record_id,order_index,kind,
         turn_index,step_index,source_seq,started_at,time_seconds,tool_name,call_id,is_error,
-        tool_json,usage_json,flags_json,summary,detail_text,detail_blob)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        tool_json,hook_json,usage_json,flags_json,summary,detail_text,detail_blob)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const insFts = this.db.prepare('INSERT INTO records_fts (text,session_id,source,record_id) VALUES (?,?,?,?)');
       for (const r of s.records) {
         const detail = r.detailText ?? null;
@@ -255,6 +262,7 @@ export class Store {
           r.sourceSeq != null ? String(r.sourceSeq) : null, r.startedAt, r.timeSeconds,
           r.toolName ?? null, r.callId ?? null, r.isError ? 1 : 0,
           r.tool ? JSON.stringify(r.tool) : null,
+          r.hook ? JSON.stringify(r.hook) : null,
           r.usage ? JSON.stringify(r.usage) : null, JSON.stringify(r.flags), r.text,
           blob ? null : detail, blob,
         ]));

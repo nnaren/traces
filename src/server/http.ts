@@ -77,6 +77,9 @@ const TIMELINE_KINDS = new Set([
   'system', 'user', 'context', 'compacted',
   'message', 'reasoning',
   'tool', 'subtool',
+  // A hook injection is an external rule speaking to the model. On the timeline it belongs
+  // with the model's own reasoning — it is input that shaped the next steps, not output.
+  'hook',
 ]);
 
 export function startServer(opts: { dataDir: string; port: number; host?: string }) {
@@ -303,6 +306,9 @@ function shapeRecord(r: any) {
     // NormToolCall, kept whole so the inspector can show 参数 and 结果 separately
     // instead of the concatenated detail_text, and can expose sub-tool nesting.
     tool: safeParse(r.tool_json, undefined),
+    // Hook injection: which lifecycle event spoke, from which hooks.json, and the tool
+    // call the model issued in response.
+    hook: safeParse(r.hook_json, undefined),
     usage: safeParse(r.usage_json, null), flags: safeParse(r.flags_json, []),
     summary: r.summary, hasDetailBlob: !!r.detail_blob,
   };

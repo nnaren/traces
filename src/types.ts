@@ -88,11 +88,36 @@ export interface TrajectorySourceAdapter {
 
 export type NormRecordKind =
   | 'system' | 'user' | 'context' | 'compacted' | 'message' | 'reasoning'
-  | 'tool' | 'subtool' | 'request-header' | 'turn-end' | 'session-end';
+  | 'tool' | 'subtool' | 'request-header' | 'turn-end' | 'session-end' | 'hook';
+
+/**
+ * A hook's text injection into the conversation (Codex `HookPrompt`).
+ *
+ * Only the INJECTION is recorded — the hook script's own execution is invisible to the
+ * transcript, and `startedAtMs === completedAtMs` on every measured record, so this carries
+ * no duration either. What a hook actually did is inferred, not logged.
+ */
+export interface NormHook {
+  /** From `hookRunId`: the lifecycle event, e.g. `stop`. */
+  eventName?: string;
+  /** From `hookRunId`: the handler's index within that event. Constant `6` in practice. */
+  handlerIndex?: number;
+  /** Which hooks.json declared the handler. */
+  configPath?: string;
+  /** The text the hook injected into the model's context. */
+  text?: string;
+  /**
+   * `call_id` of the FIRST tool call issued after this injection, resolved in a post-pass.
+   * The hook itself calls no tools — this is the model's reaction to it, which is the only
+   * part of the hook's effect the transcript can actually show.
+   */
+  triggeredCallId?: string;
+}
 
 export type RecordFlag =
   | 'unresolved-call' | 'unresolved-output' | 'partial' | 'running' | 'shadowed'
-  | 'reasoning-encrypted' | 'usage-missing' | 'ttft-missing' | 'missing-arguments';
+  | 'reasoning-encrypted' | 'usage-missing' | 'ttft-missing' | 'missing-arguments'
+  | 'hook-injected' | 'hook-triggered';
 
 export interface NormUsage {
   inputTokens?: number;
@@ -182,6 +207,7 @@ export interface NormRecord {
   startedAt?: number;
   usage?: NormUsage;
   tool?: NormToolCall;
+  hook?: NormHook;
   flags: RecordFlag[];
 }
 

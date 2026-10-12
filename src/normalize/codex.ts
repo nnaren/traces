@@ -240,6 +240,32 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
               });
             }
           }
+          /**
+           * A lifecycle hook injected text into the conversation.
+           *
+           * This is the ONLY trace a hook leaves: the script's own execution is internal to
+           * Codex and never reaches the rollout, and `started_at_ms === completed_at_ms` on
+           * every measured record, so there is no duration to report. Rendering it as an
+           * ordinary context line would bury the one thing that matters — that an external
+           * rule just spoke to the model — so it gets its own kind.
+           */
+          if (item && typeof item === 'object' && item.type === 'HookPrompt') {
+            const frags = Array.isArray(item.fragments) ? item.fragments : [];
+            const text = frags
+              .map((f: any) => (typeof f?.text === 'string' ? f.text : ''))
+              .filter(Boolean).join('\n');
+            const runId = frags.find((f: any) => typeof f?.hookRunId === 'string')?.hookRunId as string ?? '';
+            const parsed = parseHookRunId(runId);
+            const summary = parsed.eventName ? parsed.eventName + ' 钩子注入' : '钩子注入';
+            records.push({
+              recordId: rid('hook:' + orderOf(p)), kind: 'hook', orderIndex: orderOf(p),
+              turnIndex: Math.max(currentTurn, 0), stepIndex: currentStep < 0 ? undefined : currentStep,
+              text: text ? summary + '：' + firstLine(text) : summary,
+              detailText: text || runId, timeSeconds: null, startedAt: ts,
+              hook: { ...parsed, text },
+              flags: ['hook-injected'],
+            });
+          }
           break;
         }
         case 'turn_aborted': {
@@ -393,6 +419,43 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
       rec.tool.unresolved = true; rec.flags.push('unresolved-call'); diag.unresolvedCallCount++;
     }
   }
+
+  /**
+   * Link each hook injection to the first tool call the model issued in response.
+   *
+   * The hook itself issues no tools — everything it "does" to the trajectory happens because
+   * the model read the injected text and reacted. That reaction is the only part of a hook's
+   * effect the transcript can evidence.
+   *
+   * The scan runs FORWARD across turn boundaries, on purpose. A `Stop` hook fires at turn
+   * end, so the reaction legitimately lands in the next turn: restricting the link to the
+   * hook's own turn found 21 of 107, while the correct rule finds 17 — the 4 dropped are
+   * exactly the cases where a NEW USER MESSAGE sits between the hook and the tool call, i.e.
+   * the user drove that call and crediting the hook would be a fabrication.
+   *
+   * So the stopping conditions are about attribution, not about turns:
+   *   - a `user` record      → the human redirected; the next tool call is theirs
+   *   - another `hook`       → the later injection takes over the narrative
+   *   - a tool call with a `call_id` → this is the reaction; link and stop
+   * Measured across 107 injections: 17 link, 89 are followed by a user message first, 1 has
+   * no tool call at all. The honest reading is that most hook text is absorbed into context
+   * rather than triggering a traceable action.
+   */
+  const ordered = [...records].sort((a, b) => a.orderIndex - b.orderIndex);
+  for (const hookRec of records) {
+    if (hookRec.kind !== 'hook' || !hookRec.hook) continue;
+    for (const r of ordered) {
+      if (r.orderIndex <= hookRec.orderIndex) continue;
+      if (r.kind === 'user') break;
+      if (r.kind === 'hook') break;
+      if (r.kind === 'session-end') break;
+      if (r.kind === 'tool' && r.callId) {
+        hookRec.hook.triggeredCallId = r.callId;
+        r.flags.push('hook-triggered');
+        break;
+      }
+    }
+  }
   for (const [t, acc] of usageByTurn) {
     if (acc.totalTokens == null) { diag.usageMissingCount++; continue; }
     const rec = records.find((r) => r.kind === 'turn-end' && r.turnIndex === t);
@@ -415,6 +478,32 @@ function truncate(s: string, n: number): string {
   return t.length > n ? t.slice(0, n) + '\u2026' : t;
 }
 function safeJson(v: unknown): string { try { return JSON.stringify(v) ?? ''; } catch { return ''; } }
+
+/**
+ * Split a Codex `hookRunId` of the shape `stop:6:/home/…/hooks.json`.
+ *
+ * The handler index is parsed even though it never varies in practice (every measured id is
+ * `stop:6`): the field is part of the format, and hard-coding the constant would make the
+ * parse wrong the first time a second Stop handler is registered.
+ */
+function parseHookRunId(runId: string): { eventName?: string; handlerIndex?: number; configPath?: string } {
+  if (!runId) return {};
+  const i = runId.indexOf(':');
+  if (i < 0) return { eventName: runId };
+  const eventName = runId.slice(0, i);
+  const rest = runId.slice(i + 1);
+  const j = rest.indexOf(':');
+  if (j < 0) {
+    const n = Number(rest);
+    return Number.isInteger(n) ? { eventName, handlerIndex: n } : { eventName, configPath: rest };
+  }
+  const n = Number(rest.slice(0, j));
+  return {
+    eventName,
+    handlerIndex: Number.isInteger(n) ? n : undefined,
+    configPath: rest.slice(j + 1) || undefined,
+  };
+}
 
 /**
  * Marker shown in place of the (absent) arguments, so a call the model never actually
