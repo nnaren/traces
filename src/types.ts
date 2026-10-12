@@ -78,8 +78,13 @@ export interface TrajectorySourceAdapter {
    * session's first line, never in the vault's `meta.json`. Re-deriving those fields
    * belongs to the format owner, so it is exposed here instead of being re-implemented
    * per replay path.
+   *
+   * `sourcePath` is the path the capture CAME FROM (vault `meta.json`). It matters because a
+   * vault copy is re-hosted under `data/vault/<source>/<id>/`, so the copy's own path no
+   * longer carries source-specific identity that lived in the original directory name —
+   * Claude Code's `projects/<slug>/` project folder is exactly that case.
    */
-  readRef?(path: string): Promise<SessionRef | undefined>;
+  readRef?(path: string, sourcePath?: string): Promise<SessionRef | undefined>;
   /** Read the whole file as raw lines. Stable read; tolerates concurrent appends. */
   readAll(ref: SessionRef, signal?: AbortSignal): Promise<RawLine[]>;
   /** Source-specific default filtering (e.g. Claude's bulky snapshot records). */

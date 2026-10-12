@@ -16,6 +16,37 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { SessionRef, SourceCapabilities, TrajectorySourceAdapter, RawLine } from '../types.ts';
 import { readStable, splitLines, parseLine } from './stableRead.ts';
+import { projectSlugFromPath, resolveProjectSlugCached } from './claudeSlug.ts';
+
+/**
+ * The project directory for a Claude session, recovered from the `projects/<slug>/` folder.
+ *
+ * This is the ONLY reliable source on this machine: the session's first line carries no
+ * `cwd` (all 69 measured files), so the adapter's old `first.cwd` was always `undefined` —
+ * which is why every Claude card was missing its path. The slug is resolved against the
+ * filesystem rather than decoded; see claudeSlug.ts for why decoding alone is wrong.
+ */
+function cwdFromSourcePath(p: string): string | undefined {
+  const slug = projectSlugFromPath(p);
+  return slug ? resolveProjectSlugCached(slug) : undefined;
+}
+
+/** Shared ref construction, so discovery and vault replay cannot drift apart. */
+function buildClaudeRef(p: string, sessionId: string, first: any, st?: { size: number; dev: number; ino: number; mtimeMs: number; ctimeMs: number }): SessionRef {
+  return {
+    source: 'claude-code',
+    sessionId,
+    path: p,
+    // Prefer the project directory from the slug. `first.cwd` is kept as a fallback for
+    // captures taken from a layout that does carry it, but it is absent in every file here.
+    cwd: cwdFromSourcePath(p) ?? first?.cwd,
+    gitBranch: first?.gitBranch,
+    cliVersion: first?.version,
+    startedAt: first?.timestamp ? Date.parse(first.timestamp) : undefined,
+    byteSize: st?.size,
+    revision: st ? [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':') : undefined,
+  };
+}
 
 export const CLAUDE_CAPABILITIES: SourceCapabilities = {
   reasoning: 'plaintext',
@@ -73,20 +104,33 @@ export const claudeAdapter: TrajectorySourceAdapter = {
         }
         if (!first || typeof first !== 'object') continue;
         const st = await fs.stat(p).catch(() => undefined);
-        yield {
-          source: 'claude-code',
-          // The cwd-slug is NOT reversible; we trust the record's own cwd field.
-          sessionId: first.sessionId ?? f.replace(/\.jsonl$/, ''),
-          path: p,
-          cwd: first.cwd,
-          gitBranch: first.gitBranch,
-          cliVersion: first.version,
-          startedAt: first.timestamp ? Date.parse(first.timestamp) : undefined,
-          byteSize: st?.size,
-          revision: st ? [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':') : undefined,
-        };
+        yield buildClaudeRef(p, first.sessionId ?? f.replace(/\.jsonl$/, ''), first, st);
       }
     }
+  },
+
+  readRef: async (p: string, sourcePath?: string) => {
+    let first: any;
+    try {
+      const fd = await fs.open(p, 'r');
+      try {
+        const buf = Buffer.alloc(64 * 1024);
+        const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
+        let nl = -1;
+        for (let i = 0; i < bytesRead; i++) {
+          if (buf[i] === 0x0a) { nl = i; break; }
+        }
+        first = JSON.parse(buf.toString('utf8', 0, nl > 0 ? nl : bytesRead));
+      } finally { await fd.close(); }
+    } catch { return undefined; }
+    if (!first || typeof first !== 'object') return undefined;
+    const st = await fs.stat(p).catch(() => undefined);
+    const ref = buildClaudeRef(p, first.sessionId ?? path.basename(p, '.jsonl'), first, st);
+    // A vault capture re-hosts the file under data/vault/claude-code/<id>/, so its OWN path
+    // no longer carries the project slug. The ORIGINAL path (in meta.json) still does, and
+    // that is the only place the project directory can be recovered from on replay.
+    if (sourcePath) ref.cwd = cwdFromSourcePath(sourcePath) ?? ref.cwd;
+    return ref;
   },
 
   async readAll(ref: SessionRef): Promise<RawLine[]> {

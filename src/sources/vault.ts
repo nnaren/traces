@@ -63,7 +63,10 @@ export async function enumerateVault(vaultRoot: string, source: SourceId): Promi
     // (177 of 414 codex sessions lost their parent), and because the fields are absent
     // rather than wrong, nothing downstream reported it. The format owner derives them,
     // so ask it rather than re-implementing its header shape here.
-    const header = base.readRef ? await base.readRef(dataPath).catch(() => undefined) : undefined;
+    // `meta.sourcePath` is passed through: a vault copy's own path cannot carry identity that
+    // lived in the original directory name (Claude's project slug).
+    const header = base.readRef
+      ? await base.readRef(dataPath, meta.sourcePath).catch(() => undefined) : undefined;
 
     out.push({
       ref: {
