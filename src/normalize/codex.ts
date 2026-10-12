@@ -369,6 +369,7 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
           rec.tool.endedAt = ts;
           if (rec.tool.startedAt && ts) rec.tool.durationMs = (ts - rec.tool.startedAt) / 1000;
           rec.timeSeconds = rec.tool.durationMs ?? null;
+          markMissingArgs(rec, out);
           rec.detailText = rec.detailText ? rec.detailText + '\n\n-- output --\n' + out : out;
         } else {
           diag.unresolvedCallCount++;
@@ -414,6 +415,46 @@ function truncate(s: string, n: number): string {
   return t.length > n ? t.slice(0, n) + '\u2026' : t;
 }
 function safeJson(v: unknown): string { try { return JSON.stringify(v) ?? ''; } catch { return ''; } }
+
+/**
+ * Marker shown in place of the (absent) arguments, so a call the model never actually
+ * filled in cannot be misread as a deliberate no-argument invocation.
+ */
+const ARGS_MISSING_LABEL = '⚠ 参数缺失';
+
+/**
+ * Argument-layer failures the tool layer reports when it never received any arguments.
+ *
+ * Both shapes were measured in rollout 01a11705-58a8-7e83-b4b5-681c407bcf23 (MiniMax-M3
+ * over the `/v1/responses` wire API), where all 43 calls carried `arguments: ""`:
+ *   - `failed to parse function arguments: EOF while parsing a value at line 1 column 0`
+ *     — the empty string itself hitting serde_json on the exec_command/view_image path.
+ *   - `Invalid tool arguments: missing field \`prompt\``
+ *     — empty args coerced to `{}`, then rejected by schema validation instead.
+ */
+const ARG_LAYER_FAILURE =
+  /failed to parse function arguments|invalid tool arguments|missing (?:field|argument)/i;
+
+/**
+ * Flag a call whose arguments the model never produced.
+ *
+ * Requires BOTH halves of the evidence, because a blank `inputRaw` alone is ambiguous:
+ * `exec_command()` with no arguments is a perfectly valid call that succeeds and returns
+ * "Wall time: …" — flagging it would be a false positive. Pairing the blank input with an
+ * argument-layer failure is what makes it certain the arguments were lost upstream rather
+ * than omitted on purpose.
+ *
+ * Runs on output arrival (not at call creation) because the failure text only exists there,
+ * so the ledger label is retrofitted onto the already-pushed record.
+ */
+function markMissingArgs(rec: NormRecord, out: string): void {
+  if (rec.flags.includes('missing-arguments')) return;
+  if ((rec.tool?.inputRaw ?? '').trim() !== '') return;
+  if (!ARG_LAYER_FAILURE.test(out)) return;
+  rec.flags.push('missing-arguments');
+  if (rec.tool) rec.tool.argsMissing = true;
+  rec.text = (rec.toolName ?? '(unknown)') + '(' + ARGS_MISSING_LABEL + ')';
+}
 
 /**
  * Pull the readable text out of a Codex reasoning body.

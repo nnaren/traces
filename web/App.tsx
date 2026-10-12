@@ -8,6 +8,7 @@ import {
   EMPTY_NAV, canBack, canForward, pushPoint, stepBack, stepForward,
   type NavPoint, type NavState,
 } from './lib/navstack';
+import { ancestorsOf, buildSessionTree, collectBranch, flattenTree } from './lib/sessionTree';
 
 const SOURCES: Array<{ id: SourceId | 'all'; label: string }> = [
   { id: 'all', label: '全部' },
@@ -248,6 +249,29 @@ export function App() {
     if (sel) pushNav({ source: sel.source, sessionId: sel.sessionId, recordId });
   }, [jumpToRecord, sel, pushNav]);
 
+  /**
+   * Card hover panel → open that session AND scroll the ledger to the clicked message.
+   *
+   * Selecting and jumping are one gesture here, not two: the session list is where the
+   * message was chosen, so opening it and leaving the view at the head would send the user
+   * hunting for the one record they just clicked.
+   *
+   * The order matters. `selectSession` clears `jumpTo`, so the jump is issued AFTER it in
+   * the same tick; React batches the two updates and the later `setJumpTo` wins. Setting it
+   * before would be silently undone by the session reset.
+   */
+  const jumpToSessionRecord = useCallback((s: SessionRow, recordId: string) => {
+    setSel(s);
+    setFilter(s.source);
+    setInspOpen(true);
+    setSelectedRecord(null);
+    // `loadedFor` in the Ledger keys the reload on the session, so a jump within the
+    // session already open needs no refetch beyond the pages the ledger drains itself.
+    setJumpTo(recordId);
+    void api.record(s.source, s.sessionId, recordId).then((row) => setSelectedRecord(row)).catch(() => {});
+    pushNav({ source: s.source, sessionId: s.sessionId, recordId });
+  }, [pushNav]);
+
   /** Picking a ledger row must (re)open the panel, however it was closed. */
   const onLedgerSelect = useCallback((rec: RecordRow | null) => {
     setSelectedRecord(rec);
@@ -301,8 +325,86 @@ export function App() {
     const needle = q.trim().toLowerCase();
     if (!needle) return sessions;
     return sessions.filter((s) =>
-      (s.sessionId + ' ' + (s.cwd ?? '') + ' ' + (s.cliVersion ?? '')).toLowerCase().includes(needle));
+      (s.sessionId + ' ' + (s.cwd ?? '') + ' ' + (s.cliVersion ?? '') + ' ' + (s.agentNickname ?? ''))
+        .toLowerCase().includes(needle));
   }, [sessions, q]);
+
+  /**
+   * Subagents are mounted under the conversation that spawned them instead of competing
+   * for a top-level card. Depth goes past 1 (codex nests to 4 on this machine) and the
+   * deepest parents carry 33 children, so the subtree starts collapsed and shows its size.
+   */
+  const tree = useMemo(() => buildSessionTree(visible), [visible]);
+  // Only an ACTIVE SEARCH forces a subtree open: a match that hides under a collapsed
+  // parent is a result the user can never reach. With no query, `visible` IS every session,
+  // so feeding it to ancestorsOf would open every parent in the tree and make the collapse
+  // control inert.
+  //
+  // Deliberately NOT forcing open the selected session's chain: an explicit collapse must
+  // win, otherwise clicking one of a 33-child parent's subagents would permanently pin that
+  // subtree open and the toggle would silently stop responding.
+  const forcedOpen = useMemo(() => {
+    const open = new Set<string>();
+    if (q.trim()) ancestorsOf(visible, sessions).forEach((id) => open.add(id));
+    return open;
+  }, [visible, sessions, q]);
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const isCollapsed = useCallback(
+    (id: string) => !forcedOpen.has(id) && collapsed.has(id), [collapsed, forcedOpen]);
+  const rows = useMemo(() => flattenTree(tree, isCollapsed), [tree, isCollapsed]);
+  const toggle = useCallback((id: string) => setCollapsed((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  }), []);
+
+  /** Collapse or expand every subtree at once — the 33-child parents make this worth having. */
+  const setAllCollapsed = useCallback((shut: boolean) => {
+    const next = new Set<string>();
+    if (shut) for (const node of tree) collectBranch(node, next);
+    setCollapsed(next);
+  }, [tree]);
+
+  /**
+ * Full user-message list per session, fetched on hover and cached for the session's
+ * lifetime. The card itself only needs the FIRST message (already in the list payload),
+ * so this stays off the critical path for 300 cards.
+ *
+ * The entry is created in `loading` state on hover rather than on response, so the panel
+ * opens immediately — waiting for the round trip made the first hover look like a dead
+ * control.
+ */
+  type Peek = { status: 'loading' | 'ready'; messages: Array<{ recordId: string; orderIndex: number; text: string }> };
+  const [peeked, setPeeked] = useState<Map<string, Peek>>(new Map());
+  /**
+   * Which panel is currently SHOWN. Separate from `peeked`, which is only the cache: a
+   * closed panel must keep its messages so re-hovering opens instantly instead of
+   * re-fetching, and it must be closable on mouse-leave.
+   */
+  const [peekOpen, setPeekOpen] = useState<string | null>(null);
+  const peekBusy = useRef(new Set<string>());
+  const peekMessages = useCallback((s: SessionRow) => {
+    if (peekBusy.current.has(s.sessionId)) return;
+    peekBusy.current.add(s.sessionId);
+    setPeeked((prev) => {
+      if (prev.get(s.sessionId)?.status === 'ready') return prev;
+      const next = new Map(prev);
+      next.set(s.sessionId, { status: 'loading', messages: [] });
+      return next;
+    });
+    api.messages(s.source, s.sessionId)
+      .then((r) => setPeeked((prev) => {
+        const next = new Map(prev);
+        next.set(s.sessionId, { status: 'ready', messages: r.messages ?? [] });
+        return next;
+      }))
+      .catch(() => setPeeked((prev) => {
+        const next = new Map(prev);
+        next.set(s.sessionId, { status: 'ready', messages: [] });
+        return next;
+      }))
+      .finally(() => { peekBusy.current.delete(s.sessionId); });
+  }, []);
 
   return (
     <div className="app">
@@ -345,6 +447,17 @@ export function App() {
         <input className="search" placeholder="过滤 sessionId / cwd / version"
           value={q} onChange={(e) => setQ(e.target.value)} />
 
+        {/* One parent on this machine carries 33 subagents, so folding the whole list back to
+            its roots has to be one click rather than 55. */}
+        {tree.some((n) => n.children.length > 0) && (
+          <div className="s-fold">
+            <button type="button" onClick={() => setAllCollapsed(true)}
+              title="折叠所有子 agent 子树">全部折叠</button>
+            <button type="button" onClick={() => setAllCollapsed(false)}
+              title="展开所有子 agent 子树">全部展开</button>
+          </div>
+        )}
+
         <div className={'refresh ' + ingest.state}>
           <button className="refresh-btn" onClick={onRefresh} disabled={ingest.state === 'running'}
             title={ingest.state === 'running' ? '摄入进行中…' : '从 ~/.codex、~/.claude、~/.dsh 增量摄入'}>
@@ -365,33 +478,114 @@ export function App() {
 
         <div className="session-list">
           {error && <div className="err">{error}</div>}
-          {visible.map((s) => (
-            <button key={s.source + s.sessionId}
-              className={'session' + (sel?.source === s.source && sel?.sessionId === s.sessionId ? ' on' : '')}
-              onClick={() => selectSession(s)}>
-              <div className="s-row1">
-                <span className={'pill ' + s.source}>{srcLabel(s.source)}</span>
-                <span className="s-time">{fmtTime(s.startedAt)}</span>
-              </div>
-              {/* A Codex subagent rollout carries its PARENT in session_meta.session_id, so
-                  without this badge it is indistinguishable from a root conversation. */}
-              {s.parentSessionId && (
-                <div className="s-sub" title={'由会话 ' + s.parentSessionId + ' 派生'}>
-                  子 agent{s.agentNickname ? ' · ' + s.agentNickname : ''}
-                  {s.subagentDepth != null ? ' · 深度 ' + s.subagentDepth : ''}
+          {rows.map(({ node, depth }) => {
+            const s = node.session;
+            const kids = node.children.length;
+            const shut = isCollapsed(s.sessionId);
+            return (
+              <div key={s.source + s.sessionId} className={'s-node d' + depth}>
+                {depth > 0 && <div className="s-rail" aria-hidden="true" />}
+                {/* A div carrying role=button, not a <button>: the collapse control below is a
+                    real button and HTML forbids one button inside another (the parser closes
+                    the outer one, which mangles the card). role + tabIndex + Enter/Space keeps
+                    the card keyboard-operable without nesting interactive elements. */}
+                <div role="button" tabIndex={0}
+                  className={'session' + (sel?.source === s.source && sel?.sessionId === s.sessionId ? ' on' : '')}
+                  onClick={() => selectSession(s)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectSession(s); }
+                  }}>
+                  <div className="s-row1">
+                    {kids > 0 ? (
+                      <button type="button" className="s-tw" aria-expanded={!shut}
+                        aria-label={(shut ? '展开' : '收起') + kids + ' 个子 agent'}
+                        title={shut ? '展开 ' + kids + ' 个子 agent' : '收起子 agent'}
+                        onClick={(e) => { e.stopPropagation(); toggle(s.sessionId); }}>
+                        <span aria-hidden="true">{shut ? '▸' : '▾'}</span>
+                        <em>{kids}</em>
+                      </button>
+                    ) : <span className="s-tw-sp" />}
+                    <span className={'pill ' + s.source}>{srcLabel(s.source)}</span>
+                    <span className="s-time">{fmtTime(s.startedAt)}</span>
+                  </div>
+                  {/* A Codex subagent rollout carries its PARENT in session_meta.session_id, so
+                      without this badge it is indistinguishable from a root conversation. */}
+                  {s.parentSessionId && (
+                    <div className="s-sub" title={'由会话 ' + s.parentSessionId + ' 派生'}>
+                      子 agent{s.agentNickname ? ' · ' + s.agentNickname : ''}
+                      {s.subagentDepth != null ? ' · 深度 ' + s.subagentDepth : ''}
+                    </div>
+                  )}
+                  {/* The session's subject, taken from its first REAL user message — a
+                      system prompt or injected <environment_context> would title every card
+                      identically. Hovering reveals the full question list of the session. */}
+                  {s.title ? (
+                    <div className="s-title" tabIndex={0}
+                      onMouseEnter={() => { setPeekOpen(s.sessionId); void peekMessages(s); }}
+                      onFocus={() => { setPeekOpen(s.sessionId); void peekMessages(s); }}
+                      onMouseLeave={() => setPeekOpen(null)}>
+                      {/* The one-line clamp lives on this inner span. `.s-title` is the
+                          positioning context for the panel below and MUST stay
+                          overflow:visible, or the panel gets clipped and the card stops
+                          opening its message list at all. */}
+                      <span className="s-title-t" title={s.title}>{subject(s.title)}</span>
+                      {/* `peekOpen` gates visibility, `peeked` caches the fetched list —
+                          a closed panel keeps its data so re-hovering opens instantly. */}
+                      {peekOpen === s.sessionId && peeked.get(s.sessionId) && (
+                        <div className="s-peek" role="tooltip"
+                          onMouseEnter={() => void peekMessages(s)}>
+                          <div className="s-peek-h">
+                            全部用户消息
+                            <span>
+                              {peeked.get(s.sessionId)!.status === 'loading'
+                                ? '载入中…'
+                                : peeked.get(s.sessionId)!.messages.length + ' 条'}
+                            </span>
+                          </div>
+                          {peeked.get(s.sessionId)!.status === 'loading'
+                            ? <div className="s-peek-empty">读取中…</div>
+                            : peeked.get(s.sessionId)!.messages.length === 0
+                              ? <div className="s-peek-empty">该会话没有用户消息</div>
+                              : (
+                                <ol>
+                                  {peeked.get(s.sessionId)!.messages.map((m, i) => (
+                                    <li key={m.recordId || m.orderIndex + ':' + i}>
+                                      {/* Click = open this session and scroll the ledger to
+                                          THIS message, not just to its top.
+                                          `stopPropagation` is REQUIRED: this button lives inside
+                                          the card's own onClick, and `selectSession` clears
+                                          `jumpTo` — without it the jump is set and then
+                                          immediately wiped in the same event. */}
+                                      <button type="button" className="s-msg"
+                                        title={m.text.length > 1200 ? `全文 ${m.text.length} 字符，点击在账本中定位` : '在账本中定位这条消息'}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setPeekOpen(null);
+                                          jumpToSessionRecord(s, m.recordId);
+                                        }}>
+                                        <span>{messageBody(m.text)}</span>
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ol>
+                              )}
+                        </div>
+                      )}
+                    </div>
+                  ) : <div className="s-title none">（无用户消息）</div>}
+                  <div className="s-id" title={s.sessionId}>{s.sessionId}</div>
+                  <div className="s-path" title={s.cwd}>{s.cwd ?? '—'}</div>
+                  <div className="s-stats">
+                    <span>{s.recordCount} 记录</span>
+                    <span>{s.turnCount} turn</span>
+                    <span>{s.stepCount} step</span>
+                    {diagCount(s.diagnostics) > 0 && <span className="warn">{diagCount(s.diagnostics)} 异常</span>}
+                  </div>
                 </div>
-              )}
-              <div className="s-id" title={s.sessionId}>{s.sessionId}</div>
-              <div className="s-path" title={s.cwd}>{s.cwd ?? '—'}</div>
-              <div className="s-stats">
-                <span>{s.recordCount} 记录</span>
-                <span>{s.turnCount} turn</span>
-                <span>{s.stepCount} step</span>
-                {diagCount(s.diagnostics) > 0 && <span className="warn">{diagCount(s.diagnostics)} 异常</span>}
               </div>
-            </button>
-          ))}
-          {visible.length === 0 && <div className="empty">无匹配会话</div>}
+            );
+          })}
+          {rows.length === 0 && <div className="empty">无匹配会话</div>}
         </div>
       </aside>
 
@@ -475,6 +669,41 @@ function diagCount(d: any): number {
 }
 function srcLabel(s: SourceId): string {
   return s === 'codex' ? 'Codex' : s === 'claude-code' ? 'Claude' : 'DSH';
+}
+
+/**
+ * Card subject from a possibly very long first user message.
+ *
+ * Measured on this machine: the median first message is 37 characters, but the longest is
+ * 7457 (a pasted spec). A fixed-width cut lands mid-word and reads as noise, so this
+ * prefers, in order: the first non-blank line with markdown structure stripped, then the
+ * first sentence of it, and only then a hard cut at a word boundary.
+ *
+ * The whole message is never returned here — it lives in the hover panel, which scrolls.
+ */
+function subject(text: string, max = 110): string {
+  const firstLine = (text ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  // Headings, quotes and bullets are document structure, not the subject of the request.
+  const clean = firstLine.replace(/^[#>\-*+\s]+/, '').replace(/\*\*/g, '').trim();
+  if (clean.length <= max) return clean;
+  const head = clean.slice(0, max);
+  const sentence = head.search(/[.。!?！？][)\]]?\s/);
+  if (sentence > 20) return head.slice(0, sentence + 1);
+  const word = head.lastIndexOf(' ');
+  return (word > max * 0.5 ? head.slice(0, word) : head) + '…';
+}
+
+/**
+ * Hover-panel body: keep far more than the card, and say so when it is cut.
+ *
+ * The panel is scrollable, so there is no layout reason to hide the rest — but a 7k pasted
+ * spec would bury every other message, so it is capped with an explicit "已截断" marker and
+ * the real length, rather than silently ending mid-sentence.
+ */
+function messageBody(text: string, max = 1200): string {
+  const t = (text ?? '').replace(/\r\n/g, '\n');
+  if (t.length <= max) return t;
+  return t.slice(0, max).trimEnd() + '\n…（已截断，全文 ' + t.length + ' 字符）';
 }
 
 /** Last N lines of a captured stream, so the error banner stays short. */

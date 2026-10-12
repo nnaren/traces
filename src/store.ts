@@ -298,9 +298,29 @@ export class Store {
       .all(source, sessionId);
   }
 
-  /** Tail-first page of records, message-aligned like DSH's paginate(). */
-  getPage(source: SourceId, sessionId: string, beforeOrder: number | undefined, limit: number): any[] {
+  /**
+   * One page of records in AUTHORITATIVE order, from either end.
+   *
+   * `dir: 'back'` (default, cursor = `before`) is tail-first: with no cursor it starts at
+   * the newest record, so the ledger opens on the end of the trajectory.
+   *
+   * `dir: 'fwd'` (cursor = `after`) is head-first: with no cursor it starts at the OLDEST
+   * record, so the ledger opens on the session's beginning — the first user message, the
+   * system prompt, the context that actually frames everything after it.
+   *
+   * Both return the page already in ascending `order_index`, so callers never sort.
+   */
+  getPage(source: SourceId, sessionId: string, beforeOrder: number | undefined, limit: number,
+          dir: 'back' | 'fwd' = 'back'): any[] {
     const lim = Math.min(Math.max(limit, 1), 1000);
+    if (dir === 'fwd') {
+      const sql = beforeOrder === undefined || beforeOrder < 0
+        ? 'SELECT * FROM records WHERE source=? AND session_id=? ORDER BY order_index ASC LIMIT ?'
+        : 'SELECT * FROM records WHERE source=? AND session_id=? AND order_index > ? ORDER BY order_index ASC LIMIT ?';
+      return (beforeOrder === undefined || beforeOrder < 0
+        ? this.db.prepare(sql).all(source, sessionId, lim)
+        : this.db.prepare(sql).all(source, sessionId, beforeOrder, lim)) as any[];
+    }
     const desc = beforeOrder === undefined || beforeOrder < 0;
     const sql = desc
       ? 'SELECT * FROM records WHERE source=? AND session_id=? ORDER BY order_index DESC LIMIT ?'
@@ -314,6 +334,53 @@ export class Store {
   getRecord(source: SourceId, sessionId: string, recordId: string): any | undefined {
     return this.db.prepare('SELECT * FROM records WHERE source=? AND session_id=? AND record_id=?')
       .get(source, sessionId, recordId);
+  }
+
+  /**
+   * A one-line title per session, taken from its FIRST real user message.
+   *
+   * `kind='user'` is the normalizer's verdict on human input, which is exactly the distinction
+   * that matters here: a session's first record is usually a system prompt or an injected
+   * `<environment_context>` block (kind `system`/`context`), and titling a card from one of
+   * those would label every session identically.
+   *
+   * `MIN(order_index)` is correlated per session, so this stays a single scan driven by the
+   * existing `records_by_order` index rather than a query per row.
+   */
+  sessionTitles(source: SourceId, sessionIds: string[]): Map<string, string> {
+    const out = new Map<string, string>();
+    if (sessionIds.length === 0) return out;
+    const sql = `
+      SELECT session_id, detail_text FROM records r
+      WHERE source = ? AND kind = 'user' AND detail_text IS NOT NULL AND detail_text <> ''
+        AND order_index = (
+          SELECT MIN(r2.order_index) FROM records r2
+          WHERE r2.source = r.source AND r2.session_id = r.session_id AND r2.kind = 'user'
+            AND r2.detail_text IS NOT NULL AND r2.detail_text <> ''
+        )
+        AND session_id IN (${sessionIds.map(() => '?').join(',')})`;
+    for (const row of this.db.prepare(sql).all(source, ...sessionIds) as any[]) {
+      if (!out.has(row.session_id)) out.set(row.session_id, row.detail_text);
+    }
+    return out;
+  }
+
+  /**
+   * Every real user message of one session, oldest first — the session's question list.
+   * Backs the card tooltip, so it is capped: a session that pastes a file can have hundreds
+   * of these and a tooltip does not benefit from all of them.
+   *
+   * `record_id` is carried so a click can jump straight to that message in the ledger
+   * instead of only reading it.
+   */
+  userMessages(source: SourceId, sessionId: string, limit = 200): Array<{ recordId: string; orderIndex: number; text: string }> {
+    const rows = this.db.prepare(
+      `SELECT record_id, order_index, detail_text FROM records
+       WHERE source=? AND session_id=? AND kind='user'
+         AND detail_text IS NOT NULL AND detail_text <> ''
+       ORDER BY order_index ASC LIMIT ?`)
+      .all(source, sessionId, Math.min(Math.max(limit, 1), 1000)) as any[];
+    return rows.map((r) => ({ recordId: r.record_id, orderIndex: r.order_index, text: r.detail_text }));
   }
 
   /**

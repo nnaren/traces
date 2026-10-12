@@ -33,12 +33,36 @@ afterAll(() => cleanup(dir));
 
 const REF: SessionRef = { source: 'codex', sessionId: 's1', path: '/fake/s1.jsonl', revision: 'r1' };
 const meta = { type: 'session_meta', ordinal: 0, timestamp: '2026-08-20T10:00:00.000Z', payload: { session_id: 's1', cwd: '/w', cli_version: '0.153.4' } };
+const userItem = { type: 'response_item', ordinal: 2, timestamp: '2026-08-20T10:00:01.100Z', payload: { type: 'message', role: 'user', content: [{ text: 'hello world' }] } };
+// Codex writes a `UserMessage` echo for real human input, and the normalizer keys the
+// human/context distinction on it. Without this echo the message above is classified as
+// injected 上下文, which is exactly the distinction the session title depends on.
+const userEcho = { type: 'event_msg', ordinal: 2.5, timestamp: '2026-08-20T10:00:01.100Z', payload: { type: 'item_completed', item: { type: 'UserMessage', id: 'um_1', client_id: 'c', content: [{ type: 'text', text: 'hello world' }] } } };
 const lines = [
   meta,
   { type: 'event_msg', ordinal: 1, timestamp: '2026-08-20T10:00:01.000Z', payload: { type: 'task_started', turn_id: 't1' } },
-  { type: 'response_item', ordinal: 2, timestamp: '2026-08-20T10:00:01.100Z', payload: { type: 'message', role: 'user', content: [{ text: 'hello world' }] } },
+  userItem,
+  userEcho,
 ];
 const session = () => normalizeCodex(REF, splitLines(Buffer.from(lines.map((l) => JSON.stringify(l)).join('\n') + '\n')));
+
+/**
+ * A session with a known record count, so head-vs-tail paging is unambiguous. The 4-line
+ * fixture above normalizes to too few records for "oldest" and "newest" to differ.
+ */
+const bigRef: SessionRef = { source: 'codex', sessionId: 'big', path: '/fake/big.jsonl', revision: 'r1' };
+function bigSession(n = 12) {
+  const ls: any[] = [
+    { type: 'session_meta', ordinal: 0, timestamp: '2026-08-20T10:00:00.000Z', payload: { session_id: 'big', id: 'big', cwd: '/w', cli_version: '0.153.4' } },
+    { type: 'event_msg', ordinal: 1, timestamp: '2026-08-20T10:00:01.000Z', payload: { type: 'task_started', turn_id: 'tb' } },
+  ];
+  for (let i = 0; i < n; i++) {
+    ls.push({ type: 'response_item', ordinal: 2 + i, timestamp: '2026-08-20T10:00:02.000Z',
+      payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'reply ' + i }] } });
+  }
+  ls.push({ type: 'event_msg', ordinal: 99, timestamp: '2026-08-20T10:00:09.000Z', payload: { type: 'task_complete', turn_id: 'tb', duration_ms: 100 } });
+  return normalizeCodex(bigRef, splitLines(Buffer.from(ls.map((l) => JSON.stringify(l)).join('\n') + '\n')));
+}
 
 describe('derived store', () => {
   it('opens, writes and reads back a session', async () => {
@@ -56,6 +80,71 @@ describe('derived store', () => {
     const s = await Store.open(dir);
     const first = s.getPage('codex', 's1', undefined, 1);
     expect(first).toHaveLength(1);
+    s.close();
+  });
+
+  /**
+   * Head-first paging: the ledger opens at the session's FIRST records, so the cursorless
+   * page must be the OLDEST slice — the mirror image of the tail-first default, which
+   * returns the newest. Getting this backwards silently shows the middle of a trajectory as
+   * if it were the beginning.
+   */
+  it('pages head-first from the oldest record when direction is fwd', async () => {
+    const s = await Store.open(dir);
+    s.writeSession(bigSession(), '/vault/big.jsonl', '/fake/big.jsonl');
+    const fwd = s.getPage('codex', 'big', undefined, 1, 'fwd');
+    const back = s.getPage('codex', 'big', undefined, 1, 'back');
+    expect(fwd).toHaveLength(1);
+    expect(Number(fwd[0].order_index)).toBeLessThan(Number(back[0].order_index));
+    s.close();
+  });
+
+  it('walks the whole session forward, in order, without gaps or repeats', async () => {
+    const s = await Store.open(dir);
+    s.writeSession(bigSession(), '/vault/big.jsonl', '/fake/big.jsonl');
+    const all = s.getPage('codex', 'big', undefined, 999, 'fwd');
+    const idx = all.map((r: any) => Number(r.order_index));
+    expect(idx.length).toBeGreaterThan(5);
+    expect(idx).toEqual([...idx].sort((a, b) => a - b));
+    expect(new Set(idx).size).toBe(idx.length);
+
+    let cursor: number | undefined;
+    const walked: number[] = [];
+    for (let i = 0; i < 999; i++) {
+      const page = s.getPage('codex', 'big', cursor, 1, 'fwd');
+      if (!page.length) break;
+      walked.push(Number(page[0].order_index));
+      cursor = Number(page[0].order_index);
+    }
+    expect(walked).toEqual(idx);
+    s.close();
+  });
+
+  /**
+   * The card title must come from a REAL user turn. A session's first record is almost always
+   * a system prompt or an injected `<environment_context>` block, and titling from one of
+   * those would give every card the same subject.
+   */
+  it('titles a session from its first REAL user message, not its system prompt', async () => {
+    const s = await Store.open(dir);
+    const titles = s.sessionTitles('codex', ['s1']);
+    expect(titles.get('s1')).toBe('hello world');
+    s.close();
+  });
+
+  it('returns every user message of a session, oldest first', async () => {
+    const s = await Store.open(dir);
+    const msgs = s.userMessages('codex', 's1');
+    expect(msgs.map((m) => m.text)).toContain('hello world');
+    const idx = msgs.map((m) => m.orderIndex);
+    expect(idx).toEqual([...idx].sort((a, b) => a - b));
+    s.close();
+  });
+
+  it('has no title for a session that never saw a human turn', async () => {
+    const s = await Store.open(dir);
+    expect(s.sessionTitles('codex', ['no-such-session']).size).toBe(0);
+    expect(s.userMessages('codex', 'no-such-session')).toEqual([]);
     s.close();
   });
 

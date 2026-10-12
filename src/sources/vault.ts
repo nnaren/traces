@@ -42,8 +42,9 @@ export interface VaultEntry {
 /** Enumerate one source's vault, reporting integrity problems instead of hiding them. */
 export async function enumerateVault(vaultRoot: string, source: SourceId): Promise<VaultEntry[]> {
   const vault = new Vault(vaultRoot);
-  const base = path.join(vaultRoot, source);
-  const ids = await fs.readdir(base).catch(() => [] as string[]);
+  const base = REAL[source];
+  const basePath = path.join(vaultRoot, source);
+  const ids = await fs.readdir(basePath).catch(() => [] as string[]);
   const out: VaultEntry[] = [];
 
   for (const sessionId of ids.sort()) {
@@ -56,16 +57,24 @@ export async function enumerateVault(vaultRoot: string, source: SourceId): Promi
     const damaged = size < 0 || (meta.byteSize > 0 && size !== meta.byteSize);
     if (damaged) continue; // never normalize a payload we cannot fully account for
 
+    // Source-specific identity — codex `parentSessionId` / `agentNickname` / `subagentDepth`
+    // — is recoverable ONLY from the copy's first line; `meta.json` never stored it.
+    // Replaying without this step erased the whole subagent tree in one rebuild
+    // (177 of 414 codex sessions lost their parent), and because the fields are absent
+    // rather than wrong, nothing downstream reported it. The format owner derives them,
+    // so ask it rather than re-implementing its header shape here.
+    const header = base.readRef ? await base.readRef(dataPath).catch(() => undefined) : undefined;
+
     out.push({
       ref: {
+        ...header,
         source,
         sessionId,
+        // Vault-specific fields win: this ref points at the CAPTURE, not the origin.
         path: dataPath,
-        // Preserve where this was captured from; the UI shows it and re-ingest compares it.
-        cwd: undefined,
         byteSize: size,
         revision: meta.sourceRevision,
-        startedAt: undefined,
+        startedAt: header?.startedAt,
       },
       damaged: false,
       partial: meta.complete === false,

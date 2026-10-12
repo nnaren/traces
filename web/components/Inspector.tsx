@@ -199,10 +199,7 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
               sections above. */}
           {isTool ? (
             <>
-              {sec('arg', '参数', undefined,
-                rec.tool?.inputRaw
-                  ? <JsonTree text={rec.tool.inputRaw} />
-                  : <div className="note">来源未记录该调用的参数。</div>)}
+              {sec('arg', '参数', undefined, renderArgs(rec))}
 
               {sec('ret', '结果', <em className="muted">{fmtDur(rec.timeSeconds)}</em>,
                 rec.tool?.outputText != null ? (
@@ -229,11 +226,7 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
         <pre className="code tall raw">{rawJson(rec, step)}</pre>
       )}
 
-      {tab === 'input' && (
-        rec.tool?.inputRaw
-          ? <JsonTree text={rec.tool.inputRaw} />
-          : <div className="note">来源未记录该调用的参数。</div>
-      )}
+      {tab === 'input' && renderArgs(rec)}
 
       {tab === 'output' && (
         rec.tool?.outputText != null ? (
@@ -401,8 +394,35 @@ function stripToolArgs(summary: string): string {
   return args;
 }
 
+/**
+ * The 参数 panel, shared by the overview section and the 输入 tab.
+ *
+ * A blank `inputRaw` has two very different meanings and must not be collapsed into one
+ * message:
+ *  - `missing-arguments` — the model/provider emitted `arguments: ""` and the tool layer
+ *    reported an argument-level failure. The parameters never existed in the transcript and
+ *    are NOT recoverable; saying only "来源未记录" hides an upstream data-loss bug behind a
+ *    benign-sounding note.
+ *  - anything else — a legitimately argument-less call, or a source that simply does not log
+ *    inputs. The generic note is correct there.
+ */
+function renderArgs(rec: RecordRow) {
+  if (rec.tool?.inputRaw) return <JsonTree text={rec.tool.inputRaw} />;
+  if (rec.flags.includes('missing-arguments')) {
+    return (
+      <div className="note warn-note">
+        上游模型未产出该调用的任何参数（<code>arguments</code> 为空字符串），工具层因此报参数解析失败。
+        <br />
+        这不是来源漏记，而是参数在生成阶段已丢失，<strong>无法从轨迹中恢复</strong>；下方「结果」为工具层的原始报错。
+      </div>
+    );
+  }
+  return <div className="note">来源未记录该调用的参数。</div>;
+}
+
 function stateLabel(rec: RecordRow): string {
   if (rec.isError) return '错误';
+  if (rec.flags.includes('missing-arguments')) return '参数缺失';
   if (rec.flags.includes('running')) return '进行中';
   if (rec.flags.includes('partial')) return '未正常结束';
   if (rec.flags.includes('unresolved-call')) return '调用无结果';
@@ -411,6 +431,7 @@ function stateLabel(rec: RecordRow): string {
 }
 function stateClass(rec: RecordRow): string {
   if (rec.isError) return 'err';
+  if (rec.flags.includes('missing-arguments')) return 'warn';
   if (rec.flags.includes('running') || rec.flags.includes('partial')) return 'warn';
   return '';
 }

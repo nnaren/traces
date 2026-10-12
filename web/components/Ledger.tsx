@@ -37,8 +37,9 @@ function offsetOf(rows: RowModel[], idx: number): number {
 }
 
 /**
- * Tail-first, virtualized trajectory ledger.
- * Opens at the newest records; "load earlier" prepends without disturbing the tail.
+ * Head-first, virtualized trajectory ledger.
+ * Opens at the session's FIRST records — the question and the context that frame the rest.
+ * "Load later" appends below without disturbing the head.
  */
 export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspectorClosed, onOpenInspector }:
   { session: SessionRow; selected: string | null; onSelect: (rec: RecordRow | null) => void
@@ -51,34 +52,53 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<number | undefined>(undefined);
   const [scrollTop, setScrollTop] = useState(0);
-  const [follow, setFollow] = useState(true);
+  const [atEnd, setAtEnd] = useState(false);
   const [loadingAll, setLoadingAll] = useState(false);
+  const [pendingTail, setPendingTail] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
   const loadedFor = useRef<string>('');
+  /**
+   * Which session's FIRST page has finished loading. The jump effect refuses to run until
+   * this equals `key`.
+   *
+   * Without it, a jump into a different session raced its own page load: the reload effect
+   * cleared `records` and fired a fetch, while the jump effect read the PREVIOUS session's
+   * stale `records`/`cursor` and drained from there — mixing two sessions' rows. Whichever
+   * promise settled last then won, so the drained pages (and the scroll target computed from
+   * them) were discarded and the ledger sat wherever it landed.
+   */
+  const [readyKey, setReadyKey] = useState('');
 
   const key = session.source + ':' + session.sessionId;
 
   useEffect(() => {
     if (loadedFor.current === key) return;
     loadedFor.current = key;
-    setRecords([]); setHasMore(false); setCursor(undefined); setFollow(true);
+    setRecords([]); setHasMore(false); setCursor(undefined); setAtEnd(false);
     setBounds({ turns: [], steps: [] });
     setScrollTop(0);
+    setPendingTail(false);
     // Turns/steps carry the SOURCE turn/step numbers, which the separators display.
     api.session(session.source, session.sessionId)
       .then((s) => setBounds({ turns: s.turns ?? [], steps: s.steps ?? [] }))
       .catch(() => {});
-    api.records(session.source, session.sessionId, undefined, PAGE)
-      .then((r) => { setRecords(r.records); setHasMore(r.hasMore); setCursor(r.nextBefore); })
-      .catch(() => {});
+    // Head-first: no cursor means the OLDEST records, so the list opens at the top.
+    api.recordsAfter(session.source, session.sessionId, undefined, PAGE)
+      .then((r) => {
+        setRecords(r.records); setHasMore(r.hasMore); setCursor(r.nextAfter ?? undefined);
+        // Publish readiness only for the session that actually landed.
+        setReadyKey((prev) => (prev === key ? prev : key));
+      })
+      .catch(() => setReadyKey((prev) => (prev === key ? prev : key)));
   }, [key, session.source, session.sessionId]);
 
-  const loadEarlier = useCallback(() => {
+  /** Append the next page below the loaded slice. */
+  const loadLater = useCallback(() => {
     if (!hasMore || cursor === undefined) return;
-    api.records(session.source, session.sessionId, cursor, PAGE).then((r) => {
-      setRecords((prev) => [...r.records, ...prev]);
+    api.recordsAfter(session.source, session.sessionId, cursor, PAGE).then((r) => {
+      setRecords((prev) => [...prev, ...r.records]);
       setHasMore(r.hasMore);
-      setCursor(r.nextBefore);
+      setCursor(r.nextAfter ?? undefined);
     });
   }, [cursor, hasMore, session.source, session.sessionId]);
 
@@ -86,75 +106,114 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
     const el = boxRef.current;
     if (!el) return;
     setScrollTop(el.scrollTop);
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    setFollow(atBottom);
+    // "At the end" is the newest LOADED record, which is what growing the list below anchors
+    // to — the mirror of the old tail-first `follow` flag.
+    setAtEnd(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
   };
 
   /**
-   * Jump to the FIRST record: drain every remaining earlier page, then scroll to the top.
+   * Jump to the session's first record.
    *
-   * Scrolling alone would land on the oldest record currently loaded (200 of 577 here),
-   * not the beginning of the session. Pages are fetched in a loop rather than through
-   * `loadEarlier` because each call reads `cursor` from state, which has not updated yet
-   * mid-loop.
+   * Head-first loading makes this a plain scroll reset: the oldest records are the ones
+   * already loaded. It used to have to drain every earlier page out of the tail-first layout,
+   * because there the top of the loaded slice was the middle of the session.
    */
-  const toTop = useCallback(async () => {
+  const toTop = useCallback(() => {
+    setScrollTop(0);
+    const el = boxRef.current;
+    if (el) el.scrollTop = 0;
+  }, []);
+
+  /**
+   * Jump to the session's LAST record — the mirror of toTop.
+   *
+   * Kept even though the list now opens at the top: a session that is still running has its
+   * newest output at the end, and head-first paging puts those pages out of reach. Without
+   * this the only way to follow a live trajectory is scrolling page by page.
+   *
+   * Pages are drained in a loop rather than through `loadLater` because each call reads
+   * `cursor` from state, which has not updated yet mid-loop.
+   */
+  const toTail = useCallback(async () => {
     if (loadingAll) return;
     const el = boxRef.current;
-    if (!hasMore || cursor === undefined) { if (el) el.scrollTop = 0; return; }
+    if (!hasMore || cursor === undefined) {
+      if (el) el.scrollTop = el.scrollHeight;
+      setScrollTop(el?.scrollTop ?? 0);
+      setAtEnd(true);
+      return;
+    }
 
     setLoadingAll(true);
-    // Stop following BEFORE the records land, or the tail-pin effect below would yank
-    // the view straight back down once the list grows.
-    setFollow(false);
     try {
       let cur: number | undefined = cursor;
       let more = true;
-      let collected: RecordRow[] = [];
-      // Hard ceiling so a pathological session cannot spin forever (50 * 200 = 10k rows).
+      const collected: RecordRow[] = [];
+      // Ceiling so a pathological session cannot spin forever (50 * 200 = 10k rows).
       for (let i = 0; i < 50 && more && cur !== undefined; i++) {
-        const r = await api.records(session.source, session.sessionId, cur, PAGE);
-        collected = [...r.records, ...collected];
+        const r = await api.recordsAfter(session.source, session.sessionId, cur, PAGE);
+        collected.push(...r.records);
         more = r.hasMore;
-        cur = r.nextBefore;
+        cur = r.nextAfter ?? undefined;
         if (r.records.length === 0) break;
       }
-      if (collected.length) setRecords((prev) => [...collected, ...prev]);
+      if (collected.length) setRecords((prev) => [...prev, ...collected]);
       setHasMore(more);
       setCursor(cur);
-      setScrollTop(0);
-      const box = boxRef.current;
-      if (box) box.scrollTop = 0;
+      setAtEnd(true);
+      // Scroll AFTER the rows render: the target offset depends on the full page sum, which
+      // does not exist until the new records are laid out.
+      setPendingTail(true);
     } finally {
       setLoadingAll(false);
     }
   }, [cursor, hasMore, loadingAll, session.source, session.sessionId]);
 
   /**
-   * Timeline block → this row. Records arrive tail-first, so the target may sit in a page
-   * that was never fetched: drain earlier pages until it appears, then centre it.
+   * Pin to the bottom once the drained pages are laid out.
+   *
+   * Reading `scrollHeight` before the render would land on the OLD bottom, which is the top
+   * of the freshly appended block — the exact bug a direct `scrollTop = scrollHeight` inside
+   * the same tick has.
+   */
+  useEffect(() => {
+    if (!pendingTail || !records.length) return;
+    const el = boxRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    setScrollTop(el.scrollTop);
+    setPendingTail(false);
+  }, [pendingTail, records]);
+
+  /**
+   * Timeline block → this row. Records arrive head-first, so the target may sit in a page
+   * that was never fetched: drain LATER pages until it appears, then centre it.
+   *
+   * Gated on `readyKey === key` — a jump issued in the same batch as a session switch must
+   * wait for THAT session's first page, or it drains from the outgoing session's cursor.
    *
    * The effect deliberately does NOT re-run on `records` — `buildRows` interleaves turn
    * and step separators, so `rows` is rebuilt on every page load and re-running on it
-   * would re-scroll the list out from under the user mid-load.
+   * would re-scroll the list out from under the user mid-load. `readyKey` is the one extra
+   * dependency: it changes exactly once per session load, which is the moment the records
+   * this closure reads become current.
    */
-  const jumpRef = useRef<string | null>(null);
-  jumpRef.current = jumpTo ?? null;
   useEffect(() => {
     if (!jumpTo) return;
+    if (readyKey !== key) return;
     let cancelled = false;
 
     (async () => {
       let recs = records;
       let cur = cursor;
       let more = hasMore;
-      // Bounded like toTop: 50 * 200 = 10k rows is far past any realistic target.
+      // Bounded: 50 * 200 = 10k rows is far past any realistic target.
       for (let i = 0; i < 50 && !recs.some((r) => r.recordId === jumpTo) && more && cur !== undefined; i++) {
-        const r = await api.records(session.source, session.sessionId, cur, PAGE);
+        const r = await api.recordsAfter(session.source, session.sessionId, cur, PAGE);
         if (cancelled) return;
-        recs = [...r.records, ...recs];
+        recs = [...recs, ...r.records];
         more = r.hasMore;
-        cur = r.nextBefore;
+        cur = r.nextAfter ?? undefined;
       }
       if (cancelled) return;
       if (recs.length !== records.length) {
@@ -168,7 +227,6 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
       // Land it a little above centre so the rows above it give context.
       // Sum the heights rather than multiplying, so this keeps working if rows ever vary.
       const target = Math.max(0, offsetOf(built, idx) - viewport / 3);
-      setFollow(false);
       setScrollTop(target);
       const el = boxRef.current;
       if (el) el.scrollTop = target;
@@ -176,15 +234,19 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
     })().catch(() => onJumpDone?.());
 
     return () => { cancelled = true; };
-    // Intentionally keyed on `jumpTo` alone; see the note above.
+    // `records`/`cursor`/`bounds`/`viewport` are deliberately omitted (see above);
+    // `readyKey` and `key` are included because they decide WHEN this runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jumpTo]);
+  }, [jumpTo, readyKey, key]);
 
-  // Pin to the tail on first load.
+  // Open at the head: the browser restores a previous scroll offset when the same element
+  // is reused across sessions, and this list must always start at the session's first record.
   useEffect(() => {
     const el = boxRef.current;
-    if (el && follow && records.length) el.scrollTop = el.scrollHeight;
-  }, [records.length, follow]);
+    if (!el || !records.length) return;
+    if (scrollTop > 0) return; // the user has moved; never yank them back
+    el.scrollTop = 0;
+  }, [records.length, scrollTop]);
 
   const rows = useMemo(
     () => buildRows(records, bounds.turns, bounds.steps),
@@ -209,15 +271,24 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
       <div className="ledger-head">
         <h3>轨迹账本</h3>
         <span className="muted">{records.length} / {session.recordCount} 条</span>
-        {follow
-          ? <span className="live">跟随尾部</span>
-          : <button className="link" onClick={() => { setFollow(true); const el = boxRef.current; if (el) el.scrollTop = el.scrollHeight; }}>回到尾部</button>}
-        {/* Drains every earlier page first, then lands on the session's first record.
-            Hidden only at the TRUE top: scrollTop 0 with pages still unloaded means the
-            view sits at the head of the loaded slice, not at the session's beginning. */}
-        {(scrollTop > 0 || hasMore) && (
-          <button className="link" disabled={loadingAll} onClick={toTop}>
-            {loadingAll ? '载入中…' : '回到顶部'}
+        {/* Only a status here — the "load later" control lives at the BOTTOM of the list,
+            where the unread records are. Duplicating it in the header put two identical
+            buttons on screen at once. */}
+        {atEnd
+          ? <span className="live">已到最新</span>
+          : hasMore
+            ? <span className="muted">向下滚动载入更多</span>
+            : <span className="muted">已全部载入</span>}
+        {/* Head-first: scrollTop 0 IS the session's beginning, so this is just a reset. */}
+        {scrollTop > 0 && (
+          <button className="link" onClick={toTop}>回到顶部</button>
+        )}
+        {/* Still needed: a running session's newest output lives at the end, and head-first
+            paging puts it out of reach without this. */}
+        {!atEnd && (
+          <button className="link" disabled={loadingAll} onClick={() => void toTail()}
+            title="载入剩余记录并跳到最后一条">
+            {loadingAll ? '载入中…' : '回到尾部'}
           </button>
         )}
         {inspectorClosed && (
@@ -226,8 +297,9 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
       </div>
 
       <div className="ledger-box" ref={boxRef} onScroll={onScroll}>
+        {/* Head-first, so "more" is BELOW the loaded slice, not above it. */}
         {hasMore && (
-          <button className="load-earlier" onClick={loadEarlier}>载入更早 {PAGE} 条 ▲</button>
+          <button className="load-later" onClick={loadLater}>载入后续 {PAGE} 条 ▾</button>
         )}
         <div style={{ height: totalH, position: 'relative' }}>
           <div style={{ position: 'absolute', top: tops[first] ?? 0, left: 0, right: 0 }}>
@@ -364,6 +436,7 @@ function kindTitle(k: string): string {
 }
 function flagIcon(f: string): string {
   if (f === 'unresolved-call' || f === 'unresolved-output') return '⚠';
+  if (f === 'missing-arguments') return '⚡';
   if (f === 'reasoning-encrypted') return '🔒';
   if (f === 'partial' || f === 'running') return '◌';
   if (f === 'shadowed') return '◑';
@@ -374,6 +447,7 @@ function flagTitle(f: string): string {
   const m: Record<string, string> = {
     'unresolved-call': '工具调用没有结果（孤儿 call，已保留未丢弃）',
     'unresolved-output': '工具结果没有对应调用（孤儿 output）',
+    'missing-arguments': '上游未产出该调用的参数，且工具层报参数解析失败（参数已丢失，不可恢复）',
     'reasoning-encrypted': '思维链已加密，无法展示内容',
     partial: '未正常结束', running: '进行中', shadowed: '被 surfaceOp.replace 遮蔽（仍保留）',
     'usage-missing': '来源未记录 usage', 'ttft-missing': '来源未记录 TTFT',

@@ -54,6 +54,65 @@ const TOP_TYPES = new Set([
  *  Resolved lazily on every call — module-load-time capture would freeze the value. */
 export const codexHome = (): string => process.env.TRAJVIEW_CODEX_HOME ?? path.join(homedir(), '.codex');
 
+/**
+ * Build a ref from a rollout's header line.
+ *
+ * Exported (and wired to `readRef`) because the vault replay path needs the SAME identity
+ * derivation, not a re-implementation: `parentSessionId` / `agentNickname` / `subagentDepth`
+ * exist only in this first line — the vault's `meta.json` never recorded them — so a replay
+ * that skipped it silently erased the entire subagent tree.
+ */
+export async function readCodexRef(p: string): Promise<SessionRef | undefined> {
+  // Read only the header line for cheap discovery.
+  let first: any;
+  try {
+    const fd = await fs.open(p, 'r');
+    try {
+      const buf = Buffer.alloc(64 * 1024);
+      const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
+      // Scan the RAW BYTES for '\n', not the decoded string. UTF-8 multi-byte chars
+      // (base_instructions.text is full of them) shift `indexOf` off the byte
+      // boundary, and `buf.toString('utf8', 0, nl)` then slices mid-character and
+      // truncates the JSON, which the parser reports as "Unterminated string" — and
+      // the catch below silently dropped the session. That bug lost a codex
+      // session with a large system prompt until it was caught by hand.
+      let nl = -1;
+      for (let i = 0; i < bytesRead; i++) {
+        if (buf[i] === 0x0a) { nl = i; break; }
+      }
+      first = JSON.parse(buf.toString('utf8', 0, nl > 0 ? nl : bytesRead));
+    } finally { await fd.close(); }
+  } catch (err) {
+    // Don't swallow silently — a malformed header was the original bug and we don't
+    // want a regression to disappear into a lower count again.
+    console.warn('trajview: codex header unreadable, skipping: ' + p + ' :: ' + (err instanceof Error ? err.message : String(err)));
+    return undefined;
+  }
+  if (first?.type !== 'session_meta') return undefined;
+  const st = await fs.stat(p).catch(() => undefined);
+  // `payload.id` is this rollout's OWN thread id; `payload.session_id` is the ROOT
+  // conversation. For a normal session the two are identical (113/113 measured on
+  // this machine), but a subagent rollout carries its PARENT in `session_id`
+  // (64/64 measured). Keying on `session_id` therefore gave every subagent its
+  // parent's identity, so they collided and were dropped as duplicates — 36% of all
+  // trajectories were invisible. `id` is present in every rollout, so prefer it.
+  const spawn = first.payload?.source?.subagent?.thread_spawn;
+  return {
+    source: 'codex',
+    sessionId: first.payload?.id ?? first.payload?.session_id ?? path.basename(p),
+    parentSessionId: first.payload?.parent_thread_id ?? spawn?.parent_thread_id,
+    agentNickname: first.payload?.agent_nickname ?? spawn?.agent_nickname ?? undefined,
+    subagentDepth: typeof spawn?.depth === 'number' ? spawn.depth : undefined,
+    path: p,
+    cwd: first.payload?.cwd,
+    cliVersion: first.payload?.cli_version,
+    // Filename dates can disagree with payload (timezones/archival); payload wins.
+    startedAt: first.payload?.timestamp ? Date.parse(first.payload.timestamp) : undefined,
+    byteSize: st?.size,
+    revision: st ? [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':') : undefined,
+  };
+}
+
 export const codexAdapter: TrajectorySourceAdapter = {
   id: 'codex',
   capabilities: CODEX_CAPABILITIES,
@@ -66,57 +125,13 @@ export const codexAdapter: TrajectorySourceAdapter = {
       // A bounded recursive walk handles both without hardcoding the depth.
       const entries = await collectJsonl(base, 0, 4);
       for (const p of entries.sort()) {
-        // Read only the header line for cheap discovery.
-        let first: any;
-        try {
-          const fd = await fs.open(p, 'r');
-          try {
-            const buf = Buffer.alloc(64 * 1024);
-            const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-            // Scan the RAW BYTES for '\n', not the decoded string. UTF-8 multi-byte chars
-            // (base_instructions.text is full of them) shift `indexOf` off the byte
-            // boundary, and `buf.toString('utf8', 0, nl)` then slices mid-character and
-            // truncates the JSON, which the parser reports as "Unterminated string" — and
-            // the catch below silently dropped the session. That bug lost a codex
-            // session with a large system prompt until it was caught by hand.
-            let nl = -1;
-            for (let i = 0; i < bytesRead; i++) {
-              if (buf[i] === 0x0a) { nl = i; break; }
-            }
-            first = JSON.parse(buf.toString('utf8', 0, nl > 0 ? nl : bytesRead));
-          } finally { await fd.close(); }
-        } catch (err) {
-          // Don't swallow silently — a malformed header was the original bug and we don't
-          // want a regression to disappear into a lower count again.
-          console.warn('trajview: codex header unreadable, skipping: ' + p + ' :: ' + (err instanceof Error ? err.message : String(err)));
-          continue;
-        }
-        if (first?.type !== 'session_meta') continue;
-        const st = await fs.stat(p).catch(() => undefined);
-        // `payload.id` is this rollout's OWN thread id; `payload.session_id` is the ROOT
-        // conversation. For a normal session the two are identical (113/113 measured on
-        // this machine), but a subagent rollout carries its PARENT in `session_id`
-        // (64/64 measured). Keying on `session_id` therefore gave every subagent its
-        // parent's identity, so they collided and were dropped as duplicates — 36% of all
-        // trajectories were invisible. `id` is present in every rollout, so prefer it.
-        const spawn = first.payload?.source?.subagent?.thread_spawn;
-        yield {
-          source: 'codex',
-          sessionId: first.payload?.id ?? first.payload?.session_id ?? path.basename(p),
-          parentSessionId: first.payload?.parent_thread_id ?? spawn?.parent_thread_id,
-          agentNickname: first.payload?.agent_nickname ?? spawn?.agent_nickname ?? undefined,
-          subagentDepth: typeof spawn?.depth === 'number' ? spawn.depth : undefined,
-          path: p,
-          cwd: first.payload?.cwd,
-          cliVersion: first.payload?.cli_version,
-          // Filename dates can disagree with payload (timezones/archival); payload wins.
-          startedAt: first.payload?.timestamp ? Date.parse(first.payload.timestamp) : undefined,
-          byteSize: st?.size,
-          revision: st ? [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':') : undefined,
-        };
+        const ref = await readCodexRef(p);
+        if (ref) yield ref;
       }
     }
   },
+
+  readRef: readCodexRef,
 
   async readAll(ref: SessionRef): Promise<RawLine[]> {
     const { text } = await readStable(ref.path);

@@ -190,4 +190,75 @@ describe('codex normalization', () => {
       userMsg('x', 3), asstMsg('y', 4), complete('t1', 5, 10)]);
     expect(s.steps.some((st) => st.model === 'gpt-5.6-sol')).toBe(true);
   });
+
+  /**
+   * REGRESSION (rollout 01a11705-58a8-7e83-b4b5-681c407bcf23, MiniMax-M3 over /v1/responses):
+   * the provider emitted `arguments: ""` for all 43 calls, so the ledger showed a flat
+   * `exec_command()` that reads like a deliberate no-argument call. Both real failure
+   * shapes are covered below — serde_json choking on the empty string, and schema
+   * validation rejecting empty args coerced to `{}`.
+   */
+  describe('arguments lost upstream (arguments: "")', () => {
+    const emptyCall = (id: string, ord: number, name = 'exec_command') => ({
+      type: 'response_item', ordinal: ord, timestamp: '2026-08-20T10:00:02.500Z',
+      payload: { type: 'function_call', call_id: id, name, arguments: '' },
+    });
+    const failOut = (id: string, ord: number, out: string) => ({
+      type: 'response_item', ordinal: ord, timestamp: '2026-08-20T10:00:03.000Z',
+      payload: { type: 'function_call_output', call_id: id, output: out },
+    });
+    const PARSE_ERR = 'failed to parse function arguments: EOF while parsing a value at line 1 column 0';
+
+    it('flags a blank-args call that failed JSON parsing', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        emptyCall('c1', 3), failOut('c1', 4, PARSE_ERR), complete('t1', 5, 10)]);
+      const tool = s.records.find((r) => r.kind === 'tool')!;
+      expect(tool.flags).toContain('missing-arguments');
+      expect(tool.tool!.argsMissing).toBe(true);
+      expect(tool.text).toBe('exec_command(⚠ 参数缺失)');
+      expect(tool.tool!.inputRaw).toBe('');
+      // the raw failure text is still preserved verbatim for evidence
+      expect(tool.tool!.outputText).toBe(PARSE_ERR);
+    });
+
+    it('flags a blank-args call rejected by schema validation', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        emptyCall('c2', 3, 'create_thread'),
+        failOut('c2', 4, "Wall time: 0.0053 seconds\nOutput: Invalid tool arguments: missing field `prompt`"),
+        complete('t1', 5, 10)]);
+      const tool = s.records.find((r) => r.kind === 'tool')!;
+      expect(tool.flags).toContain('missing-arguments');
+      expect(tool.text).toBe('create_thread(⚠ 参数缺失)');
+    });
+
+    // The critical negative: `exec_command()` with no arguments is a VALID call that
+    // succeeds. Flagging it would mark hundreds of healthy records as data loss.
+    it('does NOT flag a legitimately argument-less call that succeeded', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        emptyCall('c3', 3), failOut('c3', 4, "Wall time: 0.0043 seconds\nOutput:"),
+        complete('t1', 5, 10)]);
+      const tool = s.records.find((r) => r.kind === 'tool')!;
+      expect(tool.flags).not.toContain('missing-arguments');
+      expect(tool.tool!.argsMissing).toBeUndefined();
+      expect(tool.text).toBe('exec_command()');
+    });
+
+    // Guard against flagging on the error text alone when arguments were actually sent:
+    // a truncated/partially-streamed payload can surface the same wording.
+    it('does NOT flag a call whose arguments arrived intact', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        call('c4', 3), failOut('c4', 4, 'command not found: nosuch'), complete('t1', 5, 10)]);
+      const tool = s.records.find((r) => r.kind === 'tool')!;
+      expect(tool.flags).not.toContain('missing-arguments');
+      expect(tool.tool!.inputRaw).toBe('{"cmd":"ls"}');
+    });
+
+    it('stays silent when the output never arrives (already unresolved-call)', () => {
+      const s = run([meta(), started('t1'), userMsg('go', 2),
+        emptyCall('c5', 3), complete('t1', 4, 10)]);
+      const tool = s.records.find((r) => r.kind === 'tool')!;
+      expect(tool.flags).toContain('unresolved-call');
+      expect(tool.flags).not.toContain('missing-arguments');
+    });
+  });
 });

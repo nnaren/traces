@@ -110,7 +110,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
     if (p === '/api/sessions') {
       const source = url.searchParams.get('source') as SourceId | null;
       const limit = Number(url.searchParams.get('limit') ?? 300);
-      return json(res, store.listSessions({ source: source ?? undefined, limit }).map(shapeSession));
+      const rows = store.listSessions({ source: source ?? undefined, limit });
+      // One query for every title, not one per card.
+      const titles = rowTitles(store, rows);
+      return json(res, rows.map((r) => shapeSession(r, titles.get(r.session_id))));
     }
     if (p === '/api/search') {
       const q = url.searchParams.get('q') ?? '';
@@ -128,10 +131,33 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
       }
       if (sub === '/records') {
         const before = url.searchParams.get('before');
+        const after = url.searchParams.get('after');
         const limit = Number(url.searchParams.get('limit') ?? 200);
-        const rows = store.getPage(source, id, before === null ? undefined : Number(before), limit);
-        const oldest = rows.length ? Number(rows[0].order_index) : 0;
-        return json(res, { records: rows.map(shapeRecord), hasMore: rows.length === limit && oldest > 0, nextBefore: oldest });
+        // Direction is an EXPLICIT parameter, never inferred from a cursor being present.
+        // The head-first caller legitimately asks for the very first page with NO cursor, and
+        // `after === null` cannot tell that apart from a tail-first request — inferring it
+        // here silently served the newest records to the "opens at the top" caller, which
+        // looked like a working feature while showing the end of every trajectory.
+        const fwd = url.searchParams.get('dir') === 'fwd';
+        const cursor = fwd ? (after === null ? undefined : Number(after))
+                           : (before === null ? undefined : Number(before));
+        const rows = store.getPage(source, id, cursor, limit, fwd ? 'fwd' : 'back');
+        const first = rows.length ? Number(rows[0].order_index) : 0;
+        const last = rows.length ? Number(rows[rows.length - 1].order_index) : 0;
+        return json(res, {
+          records: rows.map(shapeRecord),
+          // Backward keeps its `first > 0` guard: reaching order 0 means the session's
+          // start, so one full page ending there is not evidence of more.
+          hasMore: fwd ? rows.length === limit : (rows.length === limit && first > 0),
+          // The cursor to continue in THIS direction.
+          nextBefore: fwd ? null : first,
+          nextAfter: fwd ? last : null,
+        });
+      }
+      if (sub === '/messages') {
+        // Every real user message, for the session card's hover preview.
+        const limit = Number(url.searchParams.get('limit') ?? 200);
+        return json(res, { messages: store.userMessages(source, id, limit) });
       }
       if (sub === '/timeline') {
         const limit = Number(url.searchParams.get('limit') ?? 4000);
@@ -231,7 +257,28 @@ function withStepAnchors(steps: any[], rows: any[]): any[] {
   }));
 }
 
-function shapeSession(r: any) {
+/**
+ * First-user-message titles for a page of session rows, grouped per source.
+ *
+ * `sessionTitles` is source-scoped, and a mixed-source list (`source=all`, the default view)
+ * spans all three, so the rows are bucketed first. Sessions with no human turn are simply
+ * absent from the map — that is the normal case for a subagent that only ever ran tools.
+ */
+function rowTitles(store: Store, rows: any[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const bySource = new Map<string, string[]>();
+  for (const r of rows) {
+    const list = bySource.get(r.source) ?? [];
+    list.push(r.session_id);
+    bySource.set(r.source, list);
+  }
+  for (const [source, ids] of bySource) {
+    for (const [id, text] of store.sessionTitles(source as SourceId, ids)) out.set(id, text);
+  }
+  return out;
+}
+
+function shapeSession(r: any, title?: string) {
   return {
     source: r.source, sessionId: r.session_id, cwd: r.cwd, gitBranch: r.git_branch,
     cliVersion: r.cli_version,
@@ -239,6 +286,9 @@ function shapeSession(r: any) {
     parentSessionId: r.parent_session_id ?? null,
     agentNickname: r.agent_nickname ?? null,
     subagentDepth: r.subagent_depth ?? null,
+    // First real user message — the session's one-line subject. Absent for a session with
+    // no human turn, and deliberately NOT taken from a system/context record.
+    title: title ?? null,
     startedAt: r.started_at, endedAt: r.ended_at,
     capabilities: safeParse(r.capabilities_json, {}), diagnostics: safeParse(r.diagnostics_json, {}),
     recordCount: r.record_count, turnCount: r.turn_count, stepCount: r.step_count,

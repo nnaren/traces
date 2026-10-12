@@ -12,6 +12,8 @@ export interface Capabilities {
 export interface SessionRow {
   source: SourceId; sessionId: string; cwd?: string; gitBranch?: string; cliVersion?: string;
   /** Codex subagents: the spawning conversation, its spawn nickname, and the spawn depth. */
+  /** First real user message — the card's one-line subject. */
+  title?: string | null;
   parentSessionId?: string | null; agentNickname?: string | null; subagentDepth?: number | null;
   startedAt?: number; endedAt?: number;
   capabilities: Capabilities;
@@ -112,9 +114,18 @@ export const api = {
     get<{ session: SessionRow; turns: TurnRow[]; steps: StepRow[] }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}`),
   records: (source: SourceId, id: string, before?: number, limit = 200) =>
-    get<{ records: RecordRow[]; hasMore: boolean; nextBefore: number }>(
+    get<{ records: RecordRow[]; hasMore: boolean; nextBefore: number | null; nextAfter: number | null }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}/records?limit=${limit}` +
       (before === undefined ? '' : '&before=' + before)),
+  /** Head-first page: `after` undefined starts at the session's OLDEST record. */
+  recordsAfter: (source: SourceId, id: string, after?: number, limit = 200) =>
+    get<{ records: RecordRow[]; hasMore: boolean; nextBefore: number | null; nextAfter: number | null }>(
+      `/api/sessions/${source}/${encodeURIComponent(id)}/records?dir=fwd&limit=${limit}` +
+      (after === undefined ? '' : '&after=' + after)),
+  /** Every real user message of a session — the card's hover preview. */
+  messages: (source: SourceId, id: string, limit = 200) =>
+    get<{ messages: Array<{ recordId: string; orderIndex: number; text: string }> }>(
+      `/api/sessions/${source}/${encodeURIComponent(id)}/messages?limit=${limit}`),
   record: (source: SourceId, id: string, rid: string) =>
     get<RecordRow & { siblings: SiblingTool[] }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}/records/${encodeURIComponent(rid)}`),

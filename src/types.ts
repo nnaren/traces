@@ -70,6 +70,16 @@ export interface TrajectorySourceAdapter {
   readonly capabilities: SourceCapabilities;
   /** Enumerate candidate sessions without reading their content. */
   discover(): AsyncIterable<SessionRef>;
+  /**
+   * Build a ref for ONE already-known path by parsing its header line.
+   *
+   * The vault replay path needs this: a ref carries source-specific identity (codex
+   * `parentSessionId` / `agentNickname` / `subagentDepth`) that lives ONLY in the
+   * session's first line, never in the vault's `meta.json`. Re-deriving those fields
+   * belongs to the format owner, so it is exposed here instead of being re-implemented
+   * per replay path.
+   */
+  readRef?(path: string): Promise<SessionRef | undefined>;
   /** Read the whole file as raw lines. Stable read; tolerates concurrent appends. */
   readAll(ref: SessionRef, signal?: AbortSignal): Promise<RawLine[]>;
   /** Source-specific default filtering (e.g. Claude's bulky snapshot records). */
@@ -82,7 +92,7 @@ export type NormRecordKind =
 
 export type RecordFlag =
   | 'unresolved-call' | 'unresolved-output' | 'partial' | 'running' | 'shadowed'
-  | 'reasoning-encrypted' | 'usage-missing' | 'ttft-missing';
+  | 'reasoning-encrypted' | 'usage-missing' | 'ttft-missing' | 'missing-arguments';
 
 export interface NormUsage {
   inputTokens?: number;
@@ -104,6 +114,12 @@ export interface NormToolCall {
   inputRaw?: string;
   outputText?: string;
   isError?: boolean;
+  /**
+   * The source wrote NO arguments at all for this call (empty `arguments`), and the
+   * tool layer reported an argument-level failure. Distinct from a legitimately
+   * argument-less call, which leaves `inputRaw` blank WITHOUT `argsMissing`.
+   */
+  argsMissing?: boolean;
   startedAt?: number;
   endedAt?: number;
   durationMs?: number | null;
