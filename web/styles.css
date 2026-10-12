@@ -284,9 +284,10 @@ code,pre,.mono{font-family:var(--mono)}
 .sw.model{background:var(--lane-model);border-color:var(--lane-model)}
 .sw.tool{background:var(--warn);border-color:var(--warn)}
 .sw.reasoning{background:var(--reasoning);border-color:var(--reasoning)}
-/* Hook shares the 输入 lane colour but is drawn with a ring, so the swatch is tellable from
-   上下文 even though both sit in that lane. */
-.sw.hook{background:transparent;border:2px solid var(--lane-context)}
+/* Hook shares the 输入 lane colour with 上下文 and is told apart the same way the strip
+   tells them apart — by opacity. The swatch must mirror `.tl-span[data-kind='hook']`
+   exactly, or the legend stops predicting what the timeline actually looks like. */
+.sw.hook{background:var(--lane-context);border-color:var(--lane-context);opacity:.55}
 /* Toggleable legend entries. A hidden kind keeps its swatch but dims and strikes the label,
    so the legend still answers "what colour is a hook" while it is off. */
 .tl-legend button.lg-tog{display:inline-flex;align-items:center;gap:0;background:transparent;

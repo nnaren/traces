@@ -174,7 +174,11 @@ export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onT
     // precedes its system message, so a time sort silently reorders the lanes.
     out.sort((a, b) => a.order - b.order || a.lane - b.lane || (a.key < b.key ? -1 : 1));
     return out;
-  }, [data]);
+    // `hiddenKinds` is REQUIRED here: the filter runs inside this memo, so without it the
+    // timeline keeps drawing every span after the legend has switched its kind off — the
+    // ledger filters (it reads hiddenKinds on every render) while the strip does not, which
+    // looks like the toggle half-works.
+  }, [data, hiddenKinds]);
 
   /**
    * Boundary markers taken straight from the logged `turn/start|end` and

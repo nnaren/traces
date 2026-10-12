@@ -23,6 +23,25 @@ function declaredKinds(): string[] {
   return [...m![1].matchAll(/'([\w-]+)'/g)].map((x) => x[1]);
 }
 
+/**
+ * Map every selector to its declaration block, splitting comma-grouped selector lists.
+ *
+ * Splitting matters: `context` and `compacted` share one block
+ * (`.tl-span[…'context'], .tl-span[…'compacted']{…}`), so a naive `selector{` match finds
+ * neither and the checks below would silently skip them.
+ */
+function cssRules(css: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const m of stripped.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    for (const sel of m[1].split(',')) {
+      const key = sel.trim();
+      if (key) out.set(key, m[2]);
+    }
+  }
+  return out;
+}
+
 describe('legend mapping', () => {
   it('covers every content kind the normalizers can emit', () => {
     const known = new Set(declaredKinds());
@@ -65,10 +84,47 @@ describe('legend mapping', () => {
    * also what tie the legend to the strip, so a missing one is a real loss of meaning.
    */
   it('has a stylesheet rule for every swatch class', () => {
-    const css = readFileSync(path.join(REPO, 'web', 'styles.css'), 'utf8');
+    const rules = cssRules(readFileSync(path.join(REPO, 'web', 'styles.css'), 'utf8'));
     for (const g of LEGEND) {
-      expect(css, `missing .sw.${g.sw} in styles.css`).toContain(`.sw.${g.sw}{`);
+      expect(rules.has(`.sw.${g.sw}`), `missing .sw.${g.sw} in styles.css`).toBe(true);
     }
+  });
+
+  /**
+   * The legend's job is to predict the strip. A swatch whose colour (or opacity) differs
+   * from the block it stands for is worse than no legend at all — the hook swatch was once
+   * a hollow ring while its block was a solid faded bar, so the two could not be matched up.
+   */
+  it('paints every swatch in the same colour the timeline uses for that kind', () => {
+    const rules = cssRules(readFileSync(path.join(REPO, 'web', 'styles.css'), 'utf8'));
+    // The swatch paints via `background`, the block via its `--bar` custom property. Two
+    // extractors, because reading a block with the swatch's pattern silently yields
+    // `undefined` for every kind and the comparison then "passes" on garbage.
+    const swatchColor = (body: string) => /background:\s*var\((--[\w-]+)\)/.exec(body)?.[1];
+    const barColor = (body: string) => /--bar:\s*var\((--[\w-]+)\)/.exec(body)?.[1];
+    const opacityOf = (body: string) => /(?:^|;)\s*opacity:\s*([\d.]+)/.exec(body)?.[1] ?? '1';
+    const mismatches: string[] = [];
+
+    for (const g of LEGEND) {
+      const swatch = rules.get(`.sw.${g.sw}`);
+      expect(swatch, `.sw.${g.sw} not found`).toBeTruthy();
+      expect(swatchColor(swatch!), `.sw.${g.sw} has no background colour`).toBeTruthy();
+      for (const kind of g.kinds) {
+        // The block rule is lane-scoped; the lane is an implementation detail here, so any
+        // lane matching this kind counts.
+        const block = [...rules.entries()]
+          .find(([sel]) => sel.startsWith('.tl-span[') && sel.includes(`[data-kind='${kind}']`))?.[1];
+        expect(block, `no .tl-span rule for kind '${kind}'`).toBeTruthy();
+        expect(barColor(block!), `.tl-span for '${kind}' has no --bar colour`).toBeTruthy();
+        if (swatchColor(swatch!) !== barColor(block!)) {
+          mismatches.push(`${g.label}/${kind}: swatch ${swatchColor(swatch!)} vs strip ${barColor(block!)}`);
+        }
+        if (opacityOf(swatch!) !== opacityOf(block!)) {
+          mismatches.push(`${g.label}/${kind}: swatch opacity ${opacityOf(swatch!)} vs strip ${opacityOf(block!)}`);
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
   });
 
   it('exposes every group kind in LEGEND_KINDS', () => {
