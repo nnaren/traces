@@ -41,12 +41,21 @@ function offsetOf(rows: RowModel[], idx: number): number {
  * Opens at the session's FIRST records — the question and the context that frame the rest.
  * "Load later" appends below without disturbing the head.
  */
-export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspectorClosed, onOpenInspector }:
+export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspectorClosed, onOpenInspector,
+  hiddenKinds, onRevealKind }:
   { session: SessionRow; selected: string | null; onSelect: (rec: RecordRow | null) => void
     /** Set by a timeline click: scroll this record into view. */
     jumpTo?: string | null; onJumpDone?: () => void
     /** Show the "详情" affordance while the inspector panel is collapsed. */
-    inspectorClosed?: boolean; onOpenInspector?: () => void }) {
+    inspectorClosed?: boolean; onOpenInspector?: () => void
+    /**
+     * Kinds switched off in the timeline legend. Filtering happens on the LOADED rows, not
+     * in the query: pagination cursors and `recordCount` keep describing the session, so a
+     * hidden kind never changes how much data the ledger believes exists.
+     */
+    hiddenKinds?: ReadonlySet<string>
+    /** A jump targeted a hidden kind — the caller un-hides it rather than failing silently. */
+    onRevealKind?: (kind: string) => void }) {
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [bounds, setBounds] = useState<{ turns: TurnRow[]; steps: StepRow[] }>({ turns: [], steps: [] });
   const [hasMore, setHasMore] = useState(false);
@@ -222,8 +231,19 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
 
       const built = buildRows(recs, bounds.turns, bounds.steps);
       // Every record has a row of its own, so a timeline click lands directly on it.
-      const idx = built.findIndex((r) => r.record?.recordId === jumpTo);
-      if (idx < 0) { onJumpDone?.(); return; }
+      let idx = built.findIndex((r) => r.record?.recordId === jumpTo);
+      // The target may be loaded but hidden behind a switched-off kind. Re-hiding it is not
+      // an option (the user asked to go there), so the kind is turned back on and the jump
+      // retries on the next render — a silent no-op here would look like a broken link.
+      if (idx < 0) {
+        const target = recs.find((r) => r.recordId === jumpTo);
+        if (target && hiddenKinds?.has(target.kind) && onRevealKind) {
+          onRevealKind(target.kind);
+          return; // the effect re-runs once `hiddenKinds` changes
+        }
+        onJumpDone?.();
+        return;
+      }
       // Land it a little above centre so the rows above it give context.
       // Sum the heights rather than multiplying, so this keeps working if rows ever vary.
       const target = Math.max(0, offsetOf(built, idx) - viewport / 3);
@@ -235,9 +255,11 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
 
     return () => { cancelled = true; };
     // `records`/`cursor`/`bounds`/`viewport` are deliberately omitted (see above);
+    // `hiddenKinds` IS included: the reveal-and-retry path above returns early, and needs
+    // the effect to run again once the kind is switched back on.
     // `readyKey` and `key` are included because they decide WHEN this runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jumpTo, readyKey, key]);
+  }, [jumpTo, readyKey, key, hiddenKinds]);
 
   // Open at the head: the browser restores a previous scroll offset when the same element
   // is reused across sessions, and this list must always start at the session's first record.
@@ -248,9 +270,18 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
     el.scrollTop = 0;
   }, [records.length, scrollTop]);
 
+  /**
+   * Rows are built from the FILTERED records so the prefix sums, and therefore the
+   * virtualization and scroll offsets, stay consistent with what is actually rendered.
+   * Filtering after `buildRows` would leave turn/step separators standing over an empty
+   * range and make every offset below them wrong.
+   */
+  const shown = useMemo(
+    () => (hiddenKinds && hiddenKinds.size ? records.filter((r) => !hiddenKinds.has(r.kind)) : records),
+    [records, hiddenKinds]);
   const rows = useMemo(
-    () => buildRows(records, bounds.turns, bounds.steps),
-    [records, bounds, session.source]);
+    () => buildRows(shown, bounds.turns, bounds.steps),
+    [shown, bounds, session.source]);
   const total = rows.length;
   const viewport = boxRef.current?.clientHeight ?? 600;
   // Prefix sums, because a row carrying folded tools is one chip-line taller than the
@@ -270,7 +301,13 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
     <section className="ledger">
       <div className="ledger-head">
         <h3>轨迹账本</h3>
-        <span className="muted">{records.length} / {session.recordCount} 条</span>
+        {/* When a kind is hidden the count would otherwise look like data loss, so the
+            hidden amount is stated explicitly. */}
+        <span className="muted">
+          {shown.length === records.length
+            ? `${records.length} / ${session.recordCount} 条`
+            : `${shown.length} / ${records.length} 条（已隐藏 ${records.length - shown.length}）`}
+        </span>
         {/* Only a status here — the "load later" control lives at the BOTTOM of the list,
             where the unread records are. Duplicating it in the header put two identical
             buttons on screen at once. */}

@@ -358,6 +358,28 @@ export function App() {
     return next;
   }), []);
 
+  /**
+   * Record kinds the user has switched OFF in the legend. Shared by the timeline and the
+   * ledger so one click means the same thing in both views.
+   *
+   * Default is "everything visible": these are noise-reduction controls for long sessions,
+   * not a mode. `reasoning` in particular dominates the ledger on Codex (175 of 603 lines in
+   * one measured session), so being able to fold it away matters — but hiding it by default
+   * would silently change what the ledger is.
+   */
+  const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
+  const toggleKind = useCallback((kind: string) => setHiddenKinds((prev) => {
+    const next = new Set(prev);
+    if (next.has(kind)) next.delete(kind); else next.add(kind);
+    return next;
+  }), []);
+  const revealKind = useCallback((kind: string) => setHiddenKinds((prev) => {
+    if (!prev.has(kind)) return prev;
+    const next = new Set(prev);
+    next.delete(kind);
+    return next;
+  }), []);
+
   /** Collapse or expand every subtree at once — the 33-child parents make this worth having. */
   const setAllCollapsed = useCallback((shut: boolean) => {
     const next = new Set<string>();
@@ -619,10 +641,12 @@ export function App() {
               </div>
             </header>
             <Timeline source={sel.source} sessionId={sel.sessionId} selected={selectedRecord}
-              onJump={onTimelineJump} />
+              onJump={onTimelineJump}
+              hiddenKinds={hiddenKinds} onToggleKind={toggleKind} />
             <div className="body-row">
               <Ledger session={sel} selected={selectedRecord?.recordId ?? null} onSelect={onLedgerSelect}
                 jumpTo={jumpTo} onJumpDone={() => setJumpTo(null)}
+                hiddenKinds={hiddenKinds} onRevealKind={revealKind}
                 inspectorClosed={!inspOpen} onOpenInspector={() => setInspOpen(true)} />
               {inspOpen && (
                 <>

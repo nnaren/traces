@@ -86,10 +86,16 @@ interface Edge {
   label: string;
 }
 
-export function Timeline({ source, sessionId, selected, onJump }: {
+export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onToggleKind }: {
   source: SourceId; sessionId: string; selected: RecordRow | null;
   /** Click a block to bring its ledger row into view. */
   onJump?: (recordId: string) => void;
+  /**
+   * Record kinds the user switched off. The timeline keeps its own full span list and
+   * filters for display, so toggling never refetches — the windows are already loaded.
+   */
+  hiddenKinds?: ReadonlySet<string>;
+  onToggleKind?: (kind: string) => void;
 }) {
   const [data, setData] = useState<{ turns: any[]; steps: any[]; spans: TimelineSpan[] } | null>(null);
   const [mode, setMode] = useState<'span' | 'time'>('span');
@@ -129,6 +135,9 @@ export function Timeline({ source, sessionId, selected, onJump }: {
 
     for (const s of data.spans) {
       if (s.startedAt == null) continue;
+      // Kinds the user switched off are dropped HERE rather than at fetch time, so toggling
+      // is instant and reversible without another round trip.
+      if (hiddenKinds?.has(s.kind)) continue;
       // A record's own elapsed time, or the span of the model call it anchors. The
       // server only attaches the latter to the record that owns a COMPLETED step, so a
       // record with no duration still degrades to a start marker rather than borrowing
@@ -193,7 +202,7 @@ export function Timeline({ source, sessionId, selected, onJump }: {
       }
     }
     return out.sort((a, b) => a.t - b.t);
-  }, [data, spans]);
+  }, [data, spans, hiddenKinds]);
 
   /**
    * Projection domain. In 等长 mode every span occupies exactly one unit, so the
@@ -433,6 +442,23 @@ export function Timeline({ source, sessionId, selected, onJump }: {
         <span><i className="sw context" />上下文</span>
         <span><i className="sw model" />模型</span>
         <span><i className="sw tool" />工具</span>
+        {/* Toggleable. These two are the highest-volume kinds in a Codex session (measured:
+            175 reasoning vs 43 tool in one rollout), so they are the ones worth folding away
+            — and the legend is where the user is already looking at kind colours. */}
+        <button type="button"
+          className={'lg-tog' + (hiddenKinds?.has('reasoning') ? ' off' : '')}
+          aria-pressed={!hiddenKinds?.has('reasoning')}
+          title={hiddenKinds?.has('reasoning') ? '显示推理记录' : '隐藏推理记录'}
+          onClick={() => onToggleKind?.('reasoning')}>
+          <i className="sw reasoning" />推理
+        </button>
+        <button type="button"
+          className={'lg-tog' + (hiddenKinds?.has('hook') ? ' off' : '')}
+          aria-pressed={!hiddenKinds?.has('hook')}
+          title={hiddenKinds?.has('hook') ? '显示钩子注入' : '隐藏钩子注入'}
+          onClick={() => onToggleKind?.('hook')}>
+          <i className="sw hook" />钩子
+        </button>
         <span><i className="sw start" />无结束时间（仅起点）</span>
         <span><i className="sw edge-ex" />轮次边界（实线=显式）</span>
         <span><i className="sw edge-step" />步边界</span>

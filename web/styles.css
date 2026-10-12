@@ -242,6 +242,12 @@ code,pre,.mono{font-family:var(--mono)}
 .tl-span[data-lane='0'][data-kind='context'],
 .tl-span[data-lane='0'][data-kind='compacted']{--bar:var(--lane-context)}
 .tl-span[data-lane='1'][data-kind='message']{--bar:var(--lane-model)}
+/* Reasoning shares the 模型 lane with the assistant message but is its own colour — it was
+   previously falling through to the grey default, which read as "system" on the strip. */
+.tl-span[data-lane='1'][data-kind='reasoning']{--bar:var(--reasoning)}
+/* Hook sits in the 输入 lane beside 上下文. Same hue, but drawn hollow via a lighter fill so
+   an external rule is tellable from injected context at strip scale. */
+.tl-span[data-lane='0'][data-kind='hook']{--bar:var(--lane-context);opacity:.55}
 .tl-span[data-lane='2'][data-kind='tool'],
 .tl-span[data-lane='2'][data-kind='subtool']{--bar:var(--warn)}
 /* No recorded end time → start marker only. Never a fabricated width. */
@@ -277,6 +283,19 @@ code,pre,.mono{font-family:var(--mono)}
 .sw.context{background:var(--lane-context);border-color:var(--lane-context)}
 .sw.model{background:var(--lane-model);border-color:var(--lane-model)}
 .sw.tool{background:var(--warn);border-color:var(--warn)}
+.sw.reasoning{background:var(--reasoning);border-color:var(--reasoning)}
+/* Hook shares the 输入 lane colour but is drawn with a ring, so the swatch is tellable from
+   上下文 even though both sit in that lane. */
+.sw.hook{background:transparent;border:2px solid var(--lane-context)}
+/* Toggleable legend entries. A hidden kind keeps its swatch but dims and strikes the label,
+   so the legend still answers "what colour is a hook" while it is off. */
+.tl-legend button.lg-tog{display:inline-flex;align-items:center;gap:0;background:transparent;
+  border:1px solid transparent;border-radius:4px;padding:0 5px;margin:0;cursor:pointer;
+  color:inherit;font:inherit;line-height:1.6}
+.tl-legend button.lg-tog:hover{background:var(--bg3);border-color:var(--line);color:var(--fg)}
+.tl-legend button.lg-tog:focus-visible{outline:1px solid var(--accent);outline-offset:1px}
+.tl-legend button.lg-tog.off{opacity:.45;text-decoration:line-through}
+.tl-legend button.lg-tog.off i.sw{filter:grayscale(1)}
 .sw.start{background:transparent;border:1px dashed var(--fg3)}
 .sw.edge-ex{background:transparent;border:none;box-shadow:inset 2px 0 0 var(--lane-context)}
 .sw.edge-step{background:transparent;border:none;box-shadow:inset 2px 0 0 var(--edge-step)}
