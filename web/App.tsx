@@ -605,12 +605,21 @@ export function App() {
                     </div>
                   ) : <div className="s-title none">（无用户消息）</div>}
                   <div className="s-id" title={s.sessionId}>{s.sessionId}</div>
-                  <div className="s-path" title={s.cwd}>{s.cwd ?? '—'}</div>
+                  {/* Every claude-code session on this machine has no cwd (35/35), while
+                      codex and dsh all do — so rendering the "unknown" dash here put the
+                      same empty line on an entire source's cards. The session header still
+                      shows it, where a single dash is informative rather than noise. */}
+                  {s.cwd && <div className="s-path" title={s.cwd}>{s.cwd}</div>}
                   <div className="s-stats">
-                    <span>{s.recordCount} 记录</span>
-                    <span>{s.turnCount} turn</span>
-                    <span>{s.stepCount} step</span>
-                    {diagCount(s.diagnostics) > 0 && <span className="warn">{diagCount(s.diagnostics)} 异常</span>}
+                    {/* Value and label are separate elements so the NUMBER can carry the
+                        weight. As one string the whole line was the same dim grey, which
+                        buried the only quantitative facts on the card. */}
+                    <span><b>{s.recordCount}</b>记录</span>
+                    <span><b>{s.turnCount}</b>turn</span>
+                    <span><b>{s.stepCount}</b>step</span>
+                    {diagCount(s.diagnostics) > 0 && (
+                      <span className="warn"><b>{diagCount(s.diagnostics)}</b>异常</span>
+                    )}
                   </div>
                 </div>
               </div>

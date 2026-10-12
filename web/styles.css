@@ -97,8 +97,11 @@ code,pre,.mono{font-family:var(--mono)}
    They used to be two rules 40 lines apart that drifted apart (11px/inherited colour here,
    10px/--fg3 there) — which is exactly how the id ended up shouting over the path. */
 .s-id,.s-path{font-family:var(--mono);font-size:10px;color:var(--fg3);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.s-id{margin:4px 0 2px}
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
+/* The id and the cwd are one metadata block, not two paragraphs: a tighter gap keeps the
+   card's subject→identity→location→counts rhythm readable instead of floating apart. */
+.s-id{margin:3px 0 0}
+.s-path{margin-top:1px}
 /* Session subject: the first real user message. Sits ABOVE the id because it is what the
    list is actually scanned by — the id only disambiguates. Hard-clamped to ONE line: the
    longest measured first message is 7457 chars, and letting it wrap turned every card into
@@ -141,8 +144,15 @@ code,pre,.mono{font-family:var(--mono)}
 .s-sub{display:inline-block;margin:2px 0;padding:0 5px;border-radius:3px;font-size:9px;
   background:color-mix(in srgb,var(--claude) 16%,transparent);color:var(--claude);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
-.s-stats{display:flex;gap:8px;color:var(--fg3);font-size:10px;margin-top:4px}
-.s-stats .warn{color:var(--warn)}
+/* Card footer: the counts are the only hard numbers on a session card, so the VALUE carries
+   the contrast and the label recedes. `tabular-nums` stops the columns shifting as counts
+   pass a digit, which is what made a list of cards look ragged. */
+.s-stats{display:flex;gap:10px;align-items:baseline;color:var(--fg3);
+  font-size:10px;margin-top:6px;padding-top:5px;border-top:1px solid var(--line)}
+.s-stats span{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
+.s-stats b{color:var(--fg);font-weight:600;font-size:11px;font-variant-numeric:tabular-nums;
+  font-feature-settings:'tnum' 1;line-height:1}
+.s-stats .warn b{color:var(--warn)}
 
 /* ---------- subagent tree ----------
    A subagent is nested under its spawning conversation, so the list needs a structural
