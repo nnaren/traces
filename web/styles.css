@@ -92,7 +92,11 @@ code,pre,.mono{font-family:var(--mono)}
 .session{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;border-left:3px solid transparent;border-radius:6px;padding:8px 9px;margin-bottom:4px;cursor:pointer;color:var(--fg)}
 .session:hover{background:var(--bg3)}
 .session.on{background:var(--bg3);border-color:var(--line);border-left-color:var(--accent)}
-.s-row1{display:flex;justify-content:space-between;align-items:center;gap:6px}
+/* NOT `justify-content:space-between`: this row holds a variable number of children — the
+   subagent collapse toggle is only present on parents. With three items, space-between puts
+   the MIDDLE one (the source pill) dead centre, which is exactly what the zero-width spacer
+   used to do. `margin-left:auto` on the timestamp pins it right whatever else is here. */
+.s-row1{display:flex;align-items:center;gap:6px}
 /* Session id and cwd are the same kind of secondary metadata, so they share ONE rule.
    They used to be two rules 40 lines apart that drifted apart (11px/inherited colour here,
    10px/--fg3 there) — which is exactly how the id ended up shouting over the path. */
@@ -139,16 +143,17 @@ code,pre,.mono{font-family:var(--mono)}
   overflow:hidden;white-space:pre-wrap;word-break:break-word;line-height:1.45}
 .s-peek .s-msg:hover>span{color:var(--accent)}
 .s-peek .s-msg:focus-visible{outline:1px solid var(--accent);outline-offset:1px;border-radius:2px}
-.s-time{color:var(--fg3);font-size:10px}
+/* The auto margin is what pushes this to the right edge; see .s-row1. */
+.s-time{color:var(--fg3);font-size:10px;margin-left:auto;flex:0 0 auto;white-space:nowrap}
 /* Codex subagent marker: the session's own rollout, not the root conversation. */
 .s-sub{display:inline-block;margin:2px 0;padding:0 5px;border-radius:3px;font-size:9px;
   background:color-mix(in srgb,var(--claude) 16%,transparent);color:var(--claude);
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
-/* Card footer: the counts are the only hard numbers on a session card, so the VALUE carries
-   the contrast and the label recedes. `tabular-nums` stops the columns shifting as counts
-   pass a digit, which is what made a list of cards look ragged. */
+/* Card footer. No rule between the path and the counts: a top border on a footer reads as a
+   separator ABOVE it, so the counts looked attached to the NEXT card rather than to their
+   own. Hierarchy comes from the value/label contrast instead. */
 .s-stats{display:flex;gap:10px;align-items:baseline;color:var(--fg3);
-  font-size:10px;margin-top:6px;padding-top:5px;border-top:1px solid var(--line)}
+  font-size:10px;margin-top:5px}
 .s-stats span{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .s-stats b{color:var(--fg);font-weight:600;font-size:11px;font-variant-numeric:tabular-nums;
   font-feature-settings:'tnum' 1;line-height:1}

@@ -125,6 +125,36 @@ describe('styles.css structure', () => {
     expect(title!.body).not.toMatch(/overflow\s*:\s*hidden/);
     expect(title!.body).toContain('position:relative');
   });
+
+  /**
+   * REGRESSION: the card header put the source pill in the MIDDLE of the row.
+   *
+   * `.s-row1` used `justify-content:space-between`, which is a two-child layout. A zero-width
+   * spacer added for the subagent toggle made it three, and space-between centres the middle
+   * item — so every pill drifted to the middle of its card. The row's child count varies
+   * (only parents carry the toggle), so the right fix is an auto margin on the timestamp,
+   * which pins it right regardless.
+   */
+  it('pins the timestamp with an auto margin rather than distributing space', () => {
+    const row = parsed.find((r) => r.selector === '.s-row1');
+    const time = parsed.find((r) => r.selector === '.s-time');
+    expect(row, '.s-row1 missing').toBeTruthy();
+    expect(time, '.s-time missing').toBeTruthy();
+    expect(row!.body, '.s-row1 must not use space-between: its child count varies')
+      .not.toMatch(/justify-content\s*:\s*space-between/);
+    expect(time!.body, '.s-time must push itself right with margin-left:auto')
+      .toMatch(/margin-left\s*:\s*auto/);
+  });
+
+  /**
+   * REGRESSION: a top border on the stats row made the counts read as belonging to the card
+   * BELOW — a border on a footer is a separator above it, and the eye attaches it downward.
+   */
+  it('keeps no separator between the card body and its counts', () => {
+    const stats = parsed.find((r) => r.selector === '.s-stats');
+    expect(stats).toBeTruthy();
+    expect(stats!.body).not.toMatch(/border-top/);
+  });
 });
 
 describe('built bundle', () => {
