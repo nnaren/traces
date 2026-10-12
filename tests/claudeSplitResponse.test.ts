@@ -102,21 +102,53 @@ describe('claude: one API response split across assistant lines', () => {
     }
   });
 
-  it('emits NO placeholder row for a tool-only response', () => {
+  /**
+   * A response that is nothing but tool calls IS a real assistant turn, and the step boundary
+   * sits between it and the next one — dropping it made those steps read as if the tools had
+   * appeared on their own.
+   *
+   * The earlier "emit nothing" rule dropped the row entirely, which made consecutive steps
+   * read as if the tool calls had appeared on their own. An earlier attempt instead labelled
+   * it "调用 Bash" — that is a sentence the model never produced, so the row carries the
+   * neutral "（仅工具调用）" instead.
+   */
+  it('keeps a NEUTRAL placeholder row for a tool-only response', () => {
     const s = run([
       user('go', T(0)),
       asst([{ type: 'tool_use', id: 'tu4', name: 'Bash', input: { command: 'ls' } }], T(1), 'msg_G', 'u' + T(0)),
     ]);
 
-    // The tool row IS the content. A "（仅工具调用）" message record here would render as a
-    // second, empty-looking 助手 row next to the 工具 row.
-    expect(s.records.filter((r) => r.kind === 'message')).toHaveLength(0);
-    expect(s.records.filter((r) => r.kind === 'reasoning')).toHaveLength(0);
+    const msgs = s.records.filter((r) => r.kind === 'message');
+    expect(msgs).toHaveLength(1);
+    // Neutral, NOT "调用 Bash": summarising the turn as a sentence would put words in the
+    // model's mouth. The honest statement is that it produced no text at all.
+    expect(msgs[0].text).toBe('（仅工具调用）');
+    expect(msgs[0].detailText ?? '').toBe('');
+    expect(msgs[0].flags).toContain('tool-only');
+    // It must sit ABOVE its tool, not replace or follow it.
     const tools = s.records.filter((r) => r.kind === 'tool');
     expect(tools).toHaveLength(1);
     expect(tools[0].toolName).toBe('Bash');
-    // No record anywhere still carries the retired placeholder.
-    expect(JSON.stringify(s.records)).not.toContain('（仅工具调用）');
+    expect(msgs[0].orderIndex).toBeLessThan(tools[0].orderIndex);
+  });
+
+  /**
+   * A split response whose FIRST line is tool-only and whose SECOND carries real text: the
+   * summary must be REPLACED by the text, and the `tool-only` flag dropped — otherwise the row
+   * keeps a placeholder badge and italics while displaying model output.
+   */
+  it('drops the tool-only summary when real text arrives later in the same response', () => {
+    const s = run([
+      user('go', T(0)),
+      asst([{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }], T(1), 'msg_J', 'u' + T(0)),
+      asst([{ type: 'text', text: 'Listed the directory.' }], T(2), 'msg_J', 'a' + T(1)),
+    ]);
+    const msgs = s.records.filter((r) => r.kind === 'message');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toBe('Listed the directory.');
+    expect(msgs[0].flags).not.toContain('tool-only');
+    // The tool is still its own row.
+    expect(s.records.filter((r) => r.kind === 'tool')).toHaveLength(1);
   });
 
   it('keeps the assistant message and its tool as SEPARATE records (one row each)', () => {

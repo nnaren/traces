@@ -158,6 +158,10 @@ code,pre,.mono{font-family:var(--mono)}
 .s-stats b{color:var(--fg);font-weight:600;font-size:11px;font-variant-numeric:tabular-nums;
   font-feature-settings:'tnum' 1;line-height:1}
 .s-stats .warn b{color:var(--warn)}
+/* A tool-only assistant turn is a summary of a decision, not model output. Keep it legible
+   but quieter than a text-bearing 助手 row, so it does not read as a second empty row
+   sitting above its 工具 rows. */
+.row.is-tool-only .sum{color:var(--fg2);font-style:italic}
 
 /* ---------- subagent tree ----------
    A subagent is nested under its spawning conversation, so the list needs a structural

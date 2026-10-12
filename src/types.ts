@@ -122,7 +122,9 @@ export interface NormHook {
 export type RecordFlag =
   | 'unresolved-call' | 'unresolved-output' | 'partial' | 'running' | 'shadowed'
   | 'reasoning-encrypted' | 'usage-missing' | 'ttft-missing' | 'missing-arguments'
-  | 'hook-injected' | 'hook-triggered';
+  | 'hook-injected' | 'hook-triggered'
+  /** An assistant turn whose only content was tool calls, so its row is a summary. */
+  | 'tool-only';
 
 export interface NormUsage {
   inputTokens?: number;

@@ -422,7 +422,8 @@ function Row({ row, active, onSelect }: { row: RowModel; active: boolean; onSele
   const parts = isTool ? splitToolLabel(r.summary, r.toolName ?? undefined) : null;
 
   return (
-    <div className={'row rec ' + r.kind + (active ? ' active' : '') + (r.isError ? ' err' : '')}
+    <div className={'row rec ' + r.kind + (active ? ' active' : '') + (r.isError ? ' err' : '')
+      + (r.flags.includes('tool-only') ? ' is-tool-only' : '')}
       style={{ height: row.height }} onClick={() => onSelect(r)}>
       <div className="row-line">
         <span className={'kind ' + r.kind} title={kindTitle(r.kind)}>{kindLabel(r.kind)}</span>
@@ -482,6 +483,7 @@ function kindTitle(k: string): string {
 }
 function flagIcon(f: string): string {
   if (f === 'unresolved-call' || f === 'unresolved-output') return '⚠';
+  if (f === 'tool-only') return '⚙';
   if (f === 'hook-injected') return '⚓';
   if (f === 'hook-triggered') return '↳';
   if (f === 'missing-arguments') return '⚡';
@@ -496,6 +498,7 @@ function flagTitle(f: string): string {
     'unresolved-call': '工具调用没有结果（孤儿 call，已保留未丢弃）',
     'unresolved-output': '工具结果没有对应调用（孤儿 output）',
     'missing-arguments': '上游未产出该调用的参数，且工具层报参数解析失败（参数已丢失，不可恢复）',
+    'tool-only': '该助手回合只发起了工具调用，此行是调用摘要（参数与结果见下方工具行）',
     'hook-injected': '生命周期钩子向对话注入了文本（钩子脚本自身的执行不留痕）',
     'hook-triggered': '这是模型对上一条钩子注入的首次工具响应',
     'reasoning-encrypted': '思维链已加密，无法展示内容',

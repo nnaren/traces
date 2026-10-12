@@ -222,6 +222,9 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
           curRec.detailText = merged;
           curRec.text = firstLine(merged);
           curRecHasText = true;
+          // The row now carries REAL model output, so it is no longer a tool-only summary.
+          // Leaving the flag on would keep it italicised and badged as something it isn't.
+          curRec.flags = curRec.flags.filter((f) => f !== 'tool-only');
         }
       } else if (body) {
         curRec = { recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
@@ -236,10 +239,25 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
           timeSeconds: null, startedAt: ts, flags: [] };
         records.push(curRec);
       } else if (hasToolCall) {
-        // Tool-only response. The tool records ARE its content and render as their own 工具
-        // rows, exactly as DSH and Codex do. Emitting a "（仅工具调用）" placeholder here is
-        // what made a single step read as TWO 助手 rows — the assistant row plus a fake one
-        // carrying nothing but the tool call.
+        /**
+         * A response whose entire content is tool calls.
+         *
+         * The row is kept because it IS an assistant turn, and the step boundary sits
+         * between it and the next one — dropping it made steps read as if the tools had
+         * appeared on their own.
+         *
+         * The label is deliberately neutral. Summarising it as "调用 Bash" invents a
+         * sentence the model never produced and puts words in its mouth; the honest
+         * description is that there was no model content, only tool calls. The `tool-only`
+         * flag lets the UI keep it visually quiet so it does not read as a second content
+         * row above its 工具 rows.
+         */
+        curRec = { recordId: rid('asst' + order), kind: 'message', orderIndex: order, turnIndex: t,
+          stepIndex, text: '（仅工具调用）', detailText: '', timeSeconds: null, startedAt: ts,
+          flags: ['tool-only'] };
+        // NOT `curRecHasText`: a later line of the same response carrying real text must
+        // REPLACE this summary, the same way it replaces a reasoning-only summary.
+        records.push(curRec);
       } else if (blocks.length > 0) {
         // Unrecognised blocks with no text and no tools: keep a row so the step is not
         // silently blank rather than dropping whatever the source recorded.
