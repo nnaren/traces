@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, fmtDur, type SourceId, type RecordRow, type TimelineSpan } from '../lib/api';
 
+import { LEGEND, LEGEND_KINDS, isGroupHidden } from '../lib/legend';
 /**
  * Three-lane timing overview, following the DSH `ui-trajectory` scheme: lanes are
  * assigned by activity class, not by the turn/step hierarchy.
@@ -86,7 +87,7 @@ interface Edge {
   label: string;
 }
 
-export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onToggleKind }: {
+export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onToggleKinds }: {
   source: SourceId; sessionId: string; selected: RecordRow | null;
   /** Click a block to bring its ledger row into view. */
   onJump?: (recordId: string) => void;
@@ -95,7 +96,8 @@ export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onT
    * filters for display, so toggling never refetches — the windows are already loaded.
    */
   hiddenKinds?: ReadonlySet<string>;
-  onToggleKind?: (kind: string) => void;
+  /** Toggles a whole legend group; see LEGEND for the kind mapping. */
+  onToggleKinds?: (kinds: readonly string[]) => void;
 }) {
   const [data, setData] = useState<{ turns: any[]; steps: any[]; spans: TimelineSpan[] } | null>(null);
   const [mode, setMode] = useState<'span' | 'time'>('span');
@@ -245,8 +247,19 @@ export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onT
 
   if (!data) return <section className="timeline"><span className="muted">加载时间线…</span></section>;
   if (!model || !spans.length) {
+    // Distinguish "this source logged no times" from "the user switched every kind off".
+    // Showing the source-limitation message for the latter would blame the data for a
+    // choice the user just made, and leave them with no way back.
+    const plottable = (data?.spans ?? []).some((s) => s.startedAt != null);
     return <section className="timeline">
-      <span className="muted">该会话没有带时间戳的记录，无法绘制时间线（来源未记录时间信息）</span>
+      {plottable
+        ? <span className="muted">
+            所有记录类别都已隐藏。
+            <button className="link" onClick={() => onToggleKinds?.(LEGEND_KINDS)}>
+              全部显示
+            </button>
+          </span>
+        : <span className="muted">该会话没有带时间戳的记录，无法绘制时间线（来源未记录时间信息）</span>}
     </section>;
   }
 
@@ -437,28 +450,18 @@ export function Timeline({ source, sessionId, selected, onJump, hiddenKinds, onT
       </div>}
 
       <div className="tl-legend muted">
-        <span><i className="sw system" />系统</span>
-        <span><i className="sw user" />用户</span>
-        <span><i className="sw context" />上下文</span>
-        <span><i className="sw model" />模型</span>
-        <span><i className="sw tool" />工具</span>
-        {/* Toggleable. These two are the highest-volume kinds in a Codex session (measured:
-            175 reasoning vs 43 tool in one rollout), so they are the ones worth folding away
-            — and the legend is where the user is already looking at kind colours. */}
-        <button type="button"
-          className={'lg-tog' + (hiddenKinds?.has('reasoning') ? ' off' : '')}
-          aria-pressed={!hiddenKinds?.has('reasoning')}
-          title={hiddenKinds?.has('reasoning') ? '显示推理记录' : '隐藏推理记录'}
-          onClick={() => onToggleKind?.('reasoning')}>
-          <i className="sw reasoning" />推理
-        </button>
-        <button type="button"
-          className={'lg-tog' + (hiddenKinds?.has('hook') ? ' off' : '')}
-          aria-pressed={!hiddenKinds?.has('hook')}
-          title={hiddenKinds?.has('hook') ? '显示钩子注入' : '隐藏钩子注入'}
-          onClick={() => onToggleKind?.('hook')}>
-          <i className="sw hook" />钩子
-        </button>
+        {LEGEND.map((g) => {
+          const off = isGroupHidden(g, hiddenKinds ?? new Set());
+          return (
+            <button key={g.label} type="button"
+              className={'lg-tog' + (off ? ' off' : '')}
+              aria-pressed={!off}
+              title={off ? `显示${g.label}记录` : `隐藏${g.label}记录`}
+              onClick={() => onToggleKinds?.(g.kinds)}>
+              <i className={'sw ' + g.sw} />{g.label}
+            </button>
+          );
+        })}
         <span><i className="sw start" />无结束时间（仅起点）</span>
         <span><i className="sw edge-ex" />轮次边界（实线=显式）</span>
         <span><i className="sw edge-step" />步边界</span>

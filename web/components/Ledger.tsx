@@ -338,6 +338,13 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
         {hasMore && (
           <button className="load-later" onClick={loadLater}>载入后续 {PAGE} 条 ▾</button>
         )}
+        {/* Every loaded record is hidden by the legend. Without this the box looks like a
+            session that failed to load rather than one the user just folded away. */}
+        {records.length > 0 && shown.length === 0 && (
+          <div className="empty">
+            已隐藏全部 {records.length} 条记录。在上方图例中点击任一类别可重新显示。
+          </div>
+        )}
         <div style={{ height: totalH, position: 'relative' }}>
           <div style={{ position: 'absolute', top: tops[first] ?? 0, left: 0, right: 0 }}>
             {slice.map((r) => <Row key={r.rowKey} row={r}

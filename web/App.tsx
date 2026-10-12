@@ -368,12 +368,21 @@ export function App() {
    * would silently change what the ledger is.
    */
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(new Set());
-  const toggleKind = useCallback((kind: string) => setHiddenKinds((prev) => {
+  /**
+   * Toggle a legend GROUP, which may cover several record kinds (`上下文` is `context` +
+   * `compacted`, `工具` is `tool` + `subtool`).
+   *
+   * Group semantics, not per-kind: if every kind in the group is already hidden the click
+   * restores the whole group; otherwise it hides the whole group. Toggling kind-by-kind
+   * would make a half-hidden group take two clicks to come back, which reads as a stuck
+   * control.
+   */
+  const toggleKinds = useCallback((kinds: readonly string[]) => setHiddenKinds((prev) => {
     const next = new Set(prev);
-    if (next.has(kind)) next.delete(kind); else next.add(kind);
+    const allHidden = kinds.every((k) => next.has(k));
+    for (const k of kinds) { if (allHidden) next.delete(k); else next.add(k); }
     return next;
-  }), []);
-  const revealKind = useCallback((kind: string) => setHiddenKinds((prev) => {
+  }), []);  const revealKind = useCallback((kind: string) => setHiddenKinds((prev) => {
     if (!prev.has(kind)) return prev;
     const next = new Set(prev);
     next.delete(kind);
@@ -642,7 +651,7 @@ export function App() {
             </header>
             <Timeline source={sel.source} sessionId={sel.sessionId} selected={selectedRecord}
               onJump={onTimelineJump}
-              hiddenKinds={hiddenKinds} onToggleKind={toggleKind} />
+              hiddenKinds={hiddenKinds} onToggleKinds={toggleKinds} />
             <div className="body-row">
               <Ledger session={sel} selected={selectedRecord?.recordId ?? null} onSelect={onLedgerSelect}
                 jumpTo={jumpTo} onJumpDone={() => setJumpTo(null)}
