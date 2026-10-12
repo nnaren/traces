@@ -211,12 +211,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
           // The tool calls THIS record owns — bounded by the next assistant record, not
           // by the step. Codex alternates AgentMessage / Reasoning blocks and each owns
           // only the tools that follow it.
+          //
+          // `inputRaw` / `outputText` ride along because the inspector renders a per-key
+          // breakdown of each call's arguments; `summary` alone only yields the truncated
+          // one-line form.
           siblings: row.turn_index != null && row.step_index != null
             ? store.getOwnedToolCalls(source, id, row)
               .map((s: any) => ({
                 recordId: s.record_id, kind: s.kind, toolName: s.tool_name,
                 callId: s.call_id, isError: s.is_error === 1, summary: s.summary,
                 timeSeconds: s.time_seconds, startedAt: s.started_at,
+                inputRaw: safeParse(s.tool_json, undefined)?.inputRaw,
+                outputText: safeParse(s.tool_json, undefined)?.outputText,
               }))
             : [],
         });

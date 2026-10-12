@@ -351,19 +351,87 @@ function PreviewBody({ rec, step, tools, encrypted, open, toggle, onSelect }: {
           <em className="muted">{tools.length}</em>
         </div>
         {tools.length > 0 ? (
-          <ul className="toolcalls">
+          <>
+            <ul className="toolcalls">
+              {tools.map((t) => (
+                <li key={t.recordId} className={t.isError ? 'err' : ''}
+                  onClick={() => onSelect?.(t.recordId)}>
+                  <span className="tc-wrench">⚒</span>
+                  <span className="tc-name">{t.toolName ?? t.kind}</span>
+                  <span className="tc-args" title={t.summary}>{stripToolArgs(t.summary)}</span>
+                  <span className="tc-dur">{fmtDur(t.timeSeconds)}</span>
+                </li>
+              ))}
+            </ul>
+            {/* The list above is one truncated line per call. This is the same calls with
+                each argument broken out by key — what you actually read when you want to
+                know WHAT a command did, not merely that one was issued. */}
+            {tools.some((t) => t.inputRaw) && (
+              <div className="calls-head static" style={{ marginTop: 10 }}><span>解析</span></div>
+            )}
             {tools.map((t) => (
-              <li key={t.recordId} className={t.isError ? 'err' : ''}
-                onClick={() => onSelect?.(t.recordId)}>
-                <span className="tc-wrench">⚒</span>
-                <span className="tc-name">{t.toolName ?? t.kind}</span>
-                <span className="tc-args" title={t.summary}>{stripToolArgs(t.summary)}</span>
-                <span className="tc-dur">{fmtDur(t.timeSeconds)}</span>
-              </li>
+              <ToolParse key={'p-' + t.recordId} tool={t} />
             ))}
-          </ul>
+          </>
         ) : <div className="note">该 step 没有工具调用。</div>}
       </div>
+    </div>
+  );
+}
+
+/**
+ * One tool call's arguments, broken out by key.
+ *
+ * A `Bash` call's whole argument object is a single `command` string, so the flat
+ * `{"command":"…"}` summary the ledger shows is unreadable once truncated — listing the keys
+ * is what makes "which of the four greps actually ran" answerable at a glance.
+ *
+ * Non-JSON arguments (a source that logs a bare string, or a tool with no recorded input)
+ * fall back to the raw text rather than showing an empty section.
+ */
+function ToolParse({ tool }: { tool: SiblingTool }) {
+  const [open, setOpen] = useState(false);
+  const parsed = useMemo(() => {
+    const raw = tool.inputRaw;
+    if (!raw) return null;
+    try {
+      const v = JSON.parse(raw);
+      return v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.entries(v as Record<string, unknown>)
+        : null;
+    } catch { return null; }
+  }, [tool.inputRaw]);
+
+  if (!tool.inputRaw) return null;
+  const entries = parsed ?? [];
+
+  return (
+    <div className="tp">
+      <button type="button" className={'tp-head' + (open ? ' on' : '')}
+        onClick={() => setOpen((o) => !o)}
+        title={open ? '收起解析' : '展开解析'}>
+        <span className="tp-caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span className="tp-name">{tool.toolName ?? tool.kind}</span>
+        {tool.isError && <span className="tp-err">错误</span>}
+      </button>
+      {open && (
+        <div className="tp-body">
+          {entries.length > 0
+            ? entries.map(([k, v]) => (
+                <div className="tp-kv" key={k}>
+                  <span className="tp-k">{k}：</span>
+                  <pre className="tp-v">{typeof v === 'string' ? v : JSON.stringify(v, null, 2)}</pre>
+                </div>
+              ))
+            : <pre className="tp-v raw">{tool.inputRaw}</pre>}
+          {tool.outputText != null && tool.outputText !== '' && (
+            <div className="tp-kv">
+              <span className="tp-k">输出：</span>
+              <pre className={'tp-v out' + (tool.isError ? ' err' : '')}>{tool.outputText}</pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

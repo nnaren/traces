@@ -81,6 +81,9 @@ export interface TimelineSpan {
 export interface SiblingTool {
   recordId: string; kind: string; toolName?: string; callId?: string;
   isError: boolean; summary: string; timeSeconds: number | null; startedAt?: number;
+  /** Raw argument JSON, so the inspector can break it down key by key. */
+  inputRaw?: string;
+  outputText?: string;
 }
 
 const base = '';
