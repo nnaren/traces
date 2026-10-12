@@ -5,6 +5,8 @@ import type { SessionRef } from '../src/types.ts';
 
 const REF: SessionRef = { source: 'claude-code', sessionId: 'c1', path: '/tmp/c1.jsonl' };
 const run = (lines: any[]) => normalizeClaude(REF, splitLines(Buffer.from(lines.map((l) => JSON.stringify(l)).join('\n') + '\n')));
+/** Round to the sub-order stride's precision, for exactness assertions. */
+const round3 = (v: number) => Math.round(v * 1000) / 1000;
 
 const user = (t: string, ts: string, extra: any = {}) => ({ type: 'user', uuid: 'u' + t, parentUuid: null, sessionId: 'c1', cwd: '/w', timestamp: ts, message: { role: 'user', content: t }, ...extra });
 const assistant = (blocks: any[], ts: string, extra: any = {}) => ({ type: 'assistant', uuid: 'a' + ts, sessionId: 'c1', cwd: '/w', timestamp: ts, message: { role: 'assistant', model: 'claude-x', content: blocks, usage: { input_tokens: 100, output_tokens: 10, output_tokens_details: { thinking_tokens: 4 } } }, ...extra });
@@ -27,6 +29,36 @@ describe('claude code normalization', () => {
     const think = s.records.find((r) => r.detailText === 'the user greeted me')!;
     expect(think).toBeTruthy();
     expect(s.steps[0].reasoning?.availability).toBe('plaintext');
+  });
+
+  /**
+   * REGRESSION: Claude spans several JSONL lines per API response, so a response's tools sit
+   * inside its assistant message's line and needed a fractional slot to sort after it. That
+   * slot was accumulated (`order += 0.001`), and binary floating point drifts: 1.001 + 0.001
+   * is 1.0019999999999998. The ledger displayed the result verbatim as `1.00199995`.
+   *
+   * The values must be EXACT and must stay strictly between their own line and the next, or
+   * the sibling window `(order_index, next order_index)` stops matching.
+   */
+  it('slots a response\'s tools at exact fractional offsets, with no float drift', () => {
+    const tools = Array.from({ length: 8 }, (_, i) => (
+      { type: 'tool_use', id: 'tu' + i, name: 'Bash', input: { command: 'cmd' + i } }));
+    const s = run([
+      user('go', '2026-01-01T00:00:00.000Z'),
+      assistant(tools, '2026-01-01T00:00:01.000Z'),
+      user('next', '2026-01-01T00:00:02.000Z'),
+    ]);
+    const idx = s.records.filter((r) => r.kind === 'tool').map((r) => r.orderIndex).sort((a, b) => a - b);
+    expect(idx).toHaveLength(8);
+    // Exact expected values, compared as numbers rather than strings so a drift of 1e-16 fails.
+    expect(idx).toEqual([1.001, 1.002, 1.003, 1.004, 1.005, 1.006, 1.007, 1.008]);
+    for (const v of idx) {
+      expect(Math.abs(round3(v) - v), `${v} drifted`).toBeLessThan(1e-9);
+    }
+    // Every slot must still sort before the following user line, or tools would be attributed
+    // to the wrong response.
+    const nextLine = Math.min(...s.records.filter((r) => r.kind === 'user' && r.detailText === 'next').map((r) => r.orderIndex));
+    for (const v of idx) expect(v).toBeLessThan(nextLine);
   });
 
   it('pairs tool_use with tool_result and derives duration from timestamps', () => {

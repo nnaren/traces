@@ -76,7 +76,29 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
    *  summary). Only real output may be appended to; a placeholder must be REPLACED, so
    *  reasoning can never leak into the 输出 tab. */
   let curRecHasText = false;
-  let curSubOrder = 0;
+  /**
+   * Sub-record slotting for a single Claude API response.
+   *
+   * One response spans several JSONL lines, and its tool calls sit INSIDE the line of the
+   * assistant message that issued them, so they share that line's physical index. Tools at
+   * the same `order_index` as their owning message fell outside the `(order_index, next
+   * order_index)` window the sibling query uses, so they get a fractional slot above it.
+   *
+   * `curSubSeq` is a COUNT, not a running total. Accumulating `order += 0.001` drifts —
+   * 1.001 + 0.001 is 1.0019999999999998 in binary floating point — which reached the ledger
+   * as order indices like `1.00199995`. Computing the value from the count each time keeps
+   * it exact for any realistic number of tools.
+   */
+  const SUB_STRIDE = 0.001;
+  let curSubBase = 0;
+  let curSubSeq = 0;
+  /** Exact value for the `seq`-th sub-record of the response based at `curSubBase`. */
+  const subOrder = (seq: number): number => {
+    // Round to the stride's precision: `base + seq * 0.001` is already exact for the ranges
+    // here, but the rounding is what guarantees it against any future stride change.
+    const scale = 1 / SUB_STRIDE;
+    return Math.round((curSubBase + seq * SUB_STRIDE) * scale) / scale;
+  };
 
   const openTurn = (ts?: number) => {
     currentTurn = turns.length;
@@ -166,7 +188,8 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
         // order_index as their owning message fell outside the window. Slot the message at
         // the response's first line order and each tool at a fractional value above it.
         // The 0.001 stride can never collide with a real line index.
-        curSubOrder = order + 0.001;
+        curSubBase = order;
+        curSubSeq = 0;
       }
 
       let text = '';
@@ -254,13 +277,12 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
         if (b.type !== 'tool_use') continue;
         const inputRaw = safeJson(b.input);
         const rec: NormRecord = {
-          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: curSubOrder, turnIndex: t, stepIndex,
+          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: subOrder(++curSubSeq), turnIndex: t, stepIndex,
           text: b.name + '(' + truncate(inputRaw, 80) + ')', detailText: inputRaw,
           toolName: b.name, callId: b.id, timeSeconds: null, startedAt: ts,
           tool: { callId: b.id, name: b.name, inputRaw, startedAt: ts, durationMs: null, depth: 0 },
           flags: [],
         };
-        curSubOrder += 0.001;
         records.push(rec);
         toolById.set(b.id, rec);
       }
