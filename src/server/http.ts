@@ -77,6 +77,9 @@ const TIMELINE_KINDS = new Set([
   'system', 'user', 'context', 'compacted',
   'message', 'reasoning',
   'tool', 'subtool',
+  // A subagent call is tool-shaped work, so it keeps the 工具 lane — but it gets its own
+  // colour so a trajectory built on delegation is readable as such.
+  'subagent',
   // A hook injection is an external rule speaking to the model. On the timeline it belongs
   // with the model's own reasoning — it is input that shaped the next steps, not output.
   'hook',
@@ -130,7 +133,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
       if (sub === '' || sub === '/') {
         const row = store.getSession(source, id);
         if (!row) return json(res, { error: 'not found' }, 404);
-        return json(res, { session: shapeSession(row), turns: store.getTurns(source, id), steps: store.getSteps(source, id) });
+        return json(res, {
+          // The title is resolved here, not only in the list route: a subagent's page reads
+          // its PARENT's row for the `父代理 / 子代理` breadcrumb, and a parent row without
+          // a title puts a bare sessionId on the left of the header — which is exactly the
+          // "id as the title" the header stopped doing everywhere else.
+          session: shapeSession(row, rowTitles(store, [row]).get(id)),
+          turns: store.getTurns(source, id), steps: store.getSteps(source, id),
+          // For a subagent: where it came from, AND the ledger row of the parent call that
+          // spawned it. Without that row id, the trip back can only reopen the parent's first
+          // page — throwing away the one thing the user navigated to find.
+          origin: sessionOrigin(store, source, row),
+        });
       }
       if (sub === '/records') {
         const before = url.searchParams.get('before');
@@ -161,6 +175,25 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
         // Every real user message, for the session card's hover preview.
         const limit = Number(url.searchParams.get('limit') ?? 200);
         return json(res, { messages: store.userMessages(source, id, limit) });
+      }
+      if (sub === '/subagents') {
+        // The header's subagent menu. Server-resolved for the same reason the inspector's
+        // links are: the browser's session list is capped and time-ordered, so a child that
+        // fell outside it would be "there but unopenable".
+        const kids = store.childSessions(source, id);
+        const kidIds = kids.map((k) => k.session_id);
+        const titles = rowTitles(store, kids);
+        const tokens = store.sessionUsageTotals(source, kidIds);
+        const nested = store.childCounts(source, kidIds);
+        return json(res, {
+          subagents: kids.map((k) => shapeSubagent(k, {
+            title: titles.get(k.session_id) ?? null,
+            // Absent stays absent: `null` renders as a dash, `0` would claim the subagent
+            // reported no tokens, which no source actually says.
+            tokens: tokens.get(k.session_id) ?? null,
+            childCount: nested.get(k.session_id) ?? 0,
+          })),
+        });
       }
       if (sub === '/timeline') {
         const limit = Number(url.searchParams.get('limit') ?? 4000);
@@ -225,6 +258,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Store, d
                 outputText: safeParse(s.tool_json, undefined)?.outputText,
               }))
             : [],
+          // The subagent conversations THIS call spawned, resolved here rather than in the
+          // browser: the client holds a capped, time-ordered session list, so a child that
+          // fell outside it would render no link even though the link is perfectly good.
+          // Codex's children are not here — their id is in the payload, not in a column —
+          // so the client merges the two sources of links.
+          subagents: row.call_id ? store.childSessionsByCallId(source, row.call_id) : [],
         });
       }
     }
@@ -287,6 +326,31 @@ function rowTitles(store: Store, rows: any[]): Map<string, string> {
   return out;
 }
 
+/**
+ * Where a subagent came from, resolved to a ROW of the parent's ledger.
+ *
+ * Two sources, two keys, and the second one has to be searched for:
+ *  - Claude Code records the spawning `Agent` call's id on the child (`spawn_call_id`), so
+ *    the parent's row is one indexed lookup away.
+ *  - Codex records no such id; the child's thread id appears in the spawn call's RESULT, so
+ *    the parent's spawn-ish records are scanned for it. Still bounded by one session.
+ *
+ * Every field is nullable and a miss is a plain `null` — the UI then opens the parent
+ * without positioning, which is wrong by nothing rather than a dead link.
+ */
+function sessionOrigin(store: Store, source: SourceId, row: any) {
+  const parentSessionId = row.parent_session_id ?? null;
+  if (!parentSessionId) return null;
+  const spawnCallId = row.spawn_call_id ?? null;
+  let spawnRecordId: string | null = null;
+  if (spawnCallId) {
+    spawnRecordId = store.findRecordByCallId(source, parentSessionId, spawnCallId)?.record_id ?? null;
+  } else {
+    spawnRecordId = store.findSpawnRecordByChildId(source, parentSessionId, row.session_id) ?? null;
+  }
+  return { parentSessionId, spawnCallId, spawnRecordId };
+}
+
 function shapeSession(r: any, title?: string) {
   return {
     source: r.source, sessionId: r.session_id, cwd: r.cwd, gitBranch: r.git_branch,
@@ -295,12 +359,36 @@ function shapeSession(r: any, title?: string) {
     parentSessionId: r.parent_session_id ?? null,
     agentNickname: r.agent_nickname ?? null,
     subagentDepth: r.subagent_depth ?? null,
+    // Claude subagents: the spawning `Agent` call's id. Codex needs no such field — its
+    // tool payload carries the child id — but Claude's `Agent` result is only prose, so
+    // this is what lets the UI draw the same jump link.
+    spawnCallId: r.spawn_call_id ?? null,
     // First real user message — the session's one-line subject. Absent for a session with
     // no human turn, and deliberately NOT taken from a system/context record.
     title: title ?? null,
     startedAt: r.started_at, endedAt: r.ended_at,
     capabilities: safeParse(r.capabilities_json, {}), diagnostics: safeParse(r.diagnostics_json, {}),
     recordCount: r.record_count, turnCount: r.turn_count, stepCount: r.step_count,
+  };
+}
+/**
+ * One row of the header's subagent menu.
+ *
+ * Everything the menu shows is on the row, so opening it never triggers a second round of
+ * per-child requests: the label (nickname / first message), the counters, the span's two
+ * endpoints, and the token total. `childCount` is here because codex nests to depth 4 and a
+ * child that spawned children is a branch, not a leaf.
+ */
+function shapeSubagent(r: any, extra: { title: string | null; tokens: number | null; childCount: number }) {
+  return {
+    source: r.source, sessionId: r.session_id,
+    agentNickname: r.agent_nickname ?? null,
+    title: extra.title,
+    depth: r.subagent_depth ?? null,
+    childCount: extra.childCount,
+    startedAt: r.started_at, endedAt: r.ended_at,
+    recordCount: r.record_count, turnCount: r.turn_count, stepCount: r.step_count,
+    tokens: extra.tokens,
   };
 }
 function shapeRecord(r: any) {
@@ -328,12 +416,29 @@ function json(res: ServerResponse, body: unknown, status = 200) {
   res.end(JSON.stringify(body));
 }
 async function serveStatic(p: string, res: ServerResponse) {
+  /**
+   * An unknown `/api/...` path must be a 404, never the SPA shell.
+   *
+   * The catch-all below answers any unmatched path with index.html, which for an API route
+   * means a 200 and an HTML body: `fetch(...).json()` then throws, the caller's `.catch`
+   * swallows it, and a feature that exists in the code renders as "nothing there". That is
+   * exactly how a freshly added endpoint looks when the server was started before it
+   * existed — the UI degrades silently and the cause is invisible from the browser.
+   */
+  if (p.startsWith('/api/')) return json(res, { error: 'not found', path: p }, 404);
   const rel = p === '/' ? 'index.html' : p.replace(/^\/+/, '');
   const file = path.join(WEB_DIST, rel);
   if (!file.startsWith(WEB_DIST)) { res.writeHead(403); return res.end('forbidden'); }
   try {
     const buf = await fs.readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream' });
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream',
+      // Assets are content-HASHED, so they can be cached forever; index.html must NOT be,
+      // because it is what points at the current hash. Without this header browsers apply a
+      // heuristic cache to it, and a rebuilt bundle keeps being served from the old one —
+      // which looks exactly like "my change had no effect" even though the API has it.
+      'Cache-Control': rel === 'index.html' ? 'no-store' : 'public, max-age=31536000, immutable',
+    });
     res.end(buf);
   } catch {
     try {

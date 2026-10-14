@@ -118,6 +118,37 @@ export function decodeZstdConcatenation(buf: Buffer): { text: string; frameCount
 
 export const dshHome = (): string => process.env.TRAJVIEW_DSH_HOME ?? path.join(homedir(), '.dsh');
 
+/**
+ * The `session` header event, and with it the whole subagent identity.
+ *
+ * DSH writes it as the FIRST event of the log, so it is cheap to get: discovery only ever
+ * reads the head of a file, never the whole thing (the largest session on this machine is
+ * 2.3 MB and `discover()` runs on every ingest).
+ *
+ * The identity fields, measured on `session-c7b1d802` and its five children:
+ *
+ *   {"type":"session","version":4,"id":"1601a248-…","createdAt":1791907407095,"cwd":"…",
+ *    "parentSession":"session-c7b1d802-…","isSeeded":false,"origin":"subagent",
+ *    "delegationDepth":1,"agentPreset":"standard"}
+ *
+ * A root conversation omits `parentSession` and `origin` and carries `delegationDepth: 0`.
+ * So the parent link is as authoritative as codex's `thread_spawn.parent_thread_id` and
+ * Claude's `subagents/*.meta.json` `toolUseId` — all three are WRITTEN BY THE SOURCE.
+ */
+async function readSessionHeader(p: string): Promise<any | undefined> {
+  let buf: Buffer;
+  try { buf = await fs.readFile(p); } catch { return undefined; }
+  const text = p.endsWith('.zstd') ? decodeZstdConcatenation(buf).text : buf.toString('utf8');
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    try {
+      const o = JSON.parse(line);
+      if (o?.type === 'session') return o;
+    } catch { /* a torn first line must not hide a readable header behind it */ }
+  }
+  return undefined;
+}
+
 export const dshAdapter: TrajectorySourceAdapter = {
   id: 'dsh',
   capabilities: DSH_CAPABILITIES,
@@ -137,11 +168,25 @@ export const dshAdapter: TrajectorySourceAdapter = {
           if (!f.endsWith('.jsonl.zstd') && !f.endsWith('.jsonl')) continue;
           const p = path.join(sdir, f);
           const st = await fs.stat(p).catch(() => undefined);
+          const header = await readSessionHeader(p);
           yield {
             source: 'dsh',
-            sessionId: s,
+            // The HEADER's id is authoritative, not the directory name: both layouts exist
+            // on this machine (61 dirs are `session-<uuid>`, 10 are a bare `<uuid>`), and
+            // the header is what the log's own `parentSession` refers to.
+            sessionId: typeof header?.id === 'string' && header.id ? header.id : s,
             path: p,
-            cwd: decodeProjectKey(proj),
+            cwd: header?.cwd ?? decodeProjectKey(proj),
+            cliVersion: typeof header?.version === 'number' ? 'format v' + header.version : undefined,
+            // Subagent identity: `parentSession` names the conversation that spawned it.
+            parentSessionId: typeof header?.parentSession === 'string' ? header.parentSession : undefined,
+            // DSH assigns no per-agent name. `agentPreset` is the ROLE the child ran under
+            // (measured: `standard` everywhere), so it is kept only when it says something —
+            // the human label is the spawn's `description`, reconciled from the parent at ingest.
+            agentNickname: typeof header?.agentPreset === 'string' && header.agentPreset !== 'standard'
+              ? header.agentPreset : undefined,
+            subagentDepth: typeof header?.delegationDepth === 'number' ? header.delegationDepth : undefined,
+            startedAt: typeof header?.createdAt === 'number' ? header.createdAt : undefined,
             byteSize: st?.size,
             revision: st ? [st.dev, st.ino, st.size, st.mtimeMs, st.ctimeMs].join(':') : undefined,
           };
@@ -164,6 +209,39 @@ export const dshAdapter: TrajectorySourceAdapter = {
       }
     }
     return out;
+  },
+
+  /**
+   * Rebuild a ref from ONE already-known path — the vault-replay seam.
+   *
+   * Without this, `--from-vault` silently erased DSH's subagent tree: `parentSession` and
+   * `delegationDepth` live only in the log's first event, and the replay path had no way to
+   * ask for them, so every child came back as a root conversation. The absence is invisible —
+   * the fields were ABSENT rather than wrong, so no counter fired — which is exactly how 177
+   * of codex's 414 sessions lost their parent once already.
+   *
+   * It works here because the vault copy keeps the log's bytes verbatim (concatenated frames
+   * included), so the header is still the first event of the first frame. The filename differs
+   * (`session.jsonl.zstd` vs `session.v4.jsonl.zstd`) but the content does not, and this
+   * routes on the parsed header either way (R5).
+   */
+  readRef: async (p: string): Promise<SessionRef | undefined> => {
+    const header = await readSessionHeader(p);
+    if (!header) return undefined;
+    const st = await fs.stat(p).catch(() => undefined);
+    return {
+      source: 'dsh',
+      sessionId: typeof header.id === 'string' && header.id ? header.id : path.basename(path.dirname(p)),
+      path: p,
+      cwd: header.cwd,
+      cliVersion: typeof header.version === 'number' ? 'format v' + header.version : undefined,
+      parentSessionId: typeof header.parentSession === 'string' ? header.parentSession : undefined,
+      agentNickname: typeof header.agentPreset === 'string' && header.agentPreset !== 'standard'
+        ? header.agentPreset : undefined,
+      subagentDepth: typeof header.delegationDepth === 'number' ? header.delegationDepth : undefined,
+      startedAt: typeof header.createdAt === 'number' ? header.createdAt : undefined,
+      byteSize: st?.size,
+    };
   },
 
   isRelevant(raw: RawLine): boolean {

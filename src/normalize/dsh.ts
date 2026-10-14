@@ -13,6 +13,7 @@ import type {
 } from '../types.ts';
 import { DSH_CAPABILITIES } from '../sources/dsh.ts';
 import { parseLine } from '../sources/stableRead.ts';
+import { isSubagentTool } from '../subagent.ts';
 
 const iso = (t?: string): number | undefined => (typeof t === 'number' ? t : t ? Date.parse(t) : undefined);
 
@@ -295,7 +296,8 @@ export function normalizeDsh(
         const t = currentTurn < 0 ? openTurn(data.turn, ts) : currentTurn;
         const inputRaw = typeof data.arguments === 'string' ? data.arguments : safeJson(data.arguments);
         const rec: NormRecord = {
-          recordId: rid('tool:' + data.callId), kind: 'tool', orderIndex: seq, turnIndex: t,
+          recordId: rid('tool:' + data.callId),
+          kind: isSubagentTool('dsh', data.name) ? 'subagent' : 'tool', orderIndex: seq, turnIndex: t,
           stepIndex: currentStep, text: data.name + '(' + truncate(inputRaw, 80) + ')',
           detailText: inputRaw, toolName: data.name, callId: data.callId, timeSeconds: null, startedAt: ts,
           tool: { callId: data.callId, name: data.name, inputRaw, startedAt: ts, durationMs: null, depth: 0 },
@@ -401,13 +403,35 @@ export function normalizeDsh(
           detailText: safeJson(data), timeSeconds: null, startedAt: ts, flags: flagsFor(seq) });
         break;
       }
+      case 'subagent/catalog': {
+        /**
+         * The parent-side REGISTRATION of a child: `childId`, `label`, `mode`.
+         *
+         * This is DSH's only parent→child key, and it carries more than it looks: the
+         * catalog does NOT record the `tool/call` id, so this event plus the call's own
+         * `arguments.description` is what pairs a child with the row that spawned it (see
+         * `Store.linkDshSubagents`). Dropping it, as this switch used to, left that pairing
+         * with nothing but a timestamp to go on — which is not enough when two children are
+         * spawned with the same description.
+         */
+        const child = data.childId ?? data.child ?? data.id;
+        const label = typeof data.label === 'string' ? data.label : undefined;
+        records.push({
+          recordId: rid('subcat:' + seq), kind: 'subagent', orderIndex: seq,
+          turnIndex: Math.max(currentTurn, 0),
+          text: '子代理登记' + (label ? ' · ' + label : '') + (child ? ' · ' + String(child).slice(0, 8) : ''),
+          detailText: safeJson(data), timeSeconds: null, startedAt: ts, flags: flagsFor(seq),
+        });
+        break;
+      }
       default:
         break;
     }
   }
 
   for (const rec of records) {
-    if (rec.kind === 'tool' && rec.callId && rec.tool && !rec.tool.outputText) {
+    // `subagent` is a call like any other: an unresolved one is just as unresolved.
+    if ((rec.kind === 'tool' || rec.kind === 'subagent') && rec.callId && rec.tool && !rec.tool.outputText) {
       rec.tool.unresolved = true; rec.flags.push('unresolved-call'); diag.unresolvedCallCount++;
     }
   }
@@ -416,6 +440,15 @@ export function normalizeDsh(
 
   return {
     source: 'dsh', sessionId: ref.sessionId, cwd: header?.cwd ?? ref.cwd, cliVersion: undefined,
+    // Subagent identity, taken from the ref rather than from the records: the header is the
+    // only place `parentSession` / `origin` / `delegationDepth` appear, and re-reading them
+    // from a record would mean the id and the identity could disagree.
+    parentSessionId: ref.parentSessionId,
+    agentNickname: ref.agentNickname,
+    subagentDepth: ref.subagentDepth,
+    // DSH's parent→child link is reconciled after ingest, because the child is written before
+    // its parent is read; see `Store.linkDshSubagents`.
+    spawnCallId: ref.spawnCallId,
     capabilities, startedAt, endedAt, turns, steps, records, diagnostics: diag,
   };
 }

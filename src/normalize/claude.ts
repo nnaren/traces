@@ -14,6 +14,7 @@ import type {
 } from '../types.ts';
 import { CLAUDE_CAPABILITIES } from '../sources/claude.ts';
 import { parseLine } from '../sources/stableRead.ts';
+import { isSubagentTool } from '../subagent.ts';
 
 const iso = (t?: string): number | undefined => (t ? Date.parse(t) : undefined);
 
@@ -39,6 +40,15 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
   }
 
   const capabilities = { ...CLAUDE_CAPABILITIES, ordering: 'physical-line-order' as const };
+
+  /**
+   * A subagent transcript, not a root conversation: its records all carry `isSidechain`.
+   *
+   * The ref already proves it (it was discovered under `<session>/subagents/`), and this is
+   * an independent check on the bytes, because a session captured from a layout this build
+   * does not recognise would otherwise be closed with the root's crash heuristic.
+   */
+  const isSubagent = ref.subagentDepth !== undefined || objs.some((o) => o.isSidechain === true);
 
   const turns: NormTurn[] = [];
   const steps: NormStep[] = [];
@@ -295,7 +305,8 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
         if (b.type !== 'tool_use') continue;
         const inputRaw = safeJson(b.input);
         const rec: NormRecord = {
-          recordId: rid('tool' + b.id), kind: 'tool', orderIndex: subOrder(++curSubSeq), turnIndex: t, stepIndex,
+          recordId: rid('tool' + b.id), kind: isSubagentTool('claude-code', b.name) ? 'subagent' : 'tool',
+          orderIndex: subOrder(++curSubSeq), turnIndex: t, stepIndex,
           text: b.name + '(' + truncate(inputRaw, 80) + ')', detailText: inputRaw,
           toolName: b.name, callId: b.id, timeSeconds: null, startedAt: ts,
           tool: { callId: b.id, name: b.name, inputRaw, startedAt: ts, durationMs: null, depth: 0 },
@@ -352,7 +363,8 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
   });
 
   for (const rec of records) {
-    if (rec.kind === 'tool' && rec.callId && rec.tool && !rec.tool.outputText) {
+    // `subagent` is a call like any other: an unresolved one is just as unresolved.
+    if ((rec.kind === 'tool' || rec.kind === 'subagent') && rec.callId && rec.tool && !rec.tool.outputText) {
       rec.tool.unresolved = true; rec.flags.push('unresolved-call'); diag.unresolvedCallCount++;
     }
   }
@@ -360,10 +372,28 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
   // (mirrors DSH interruptedTurnClosers).
   const last = turns[turns.length - 1];
   if (last && !last.endReason) {
-    last.endReason = 'interrupted';
-    records.push({ recordId: rid('turn-abort:' + last.turnIndex), kind: 'turn-end',
-      orderIndex: records.length, turnIndex: last.turnIndex, text: 'turn ' + last.turnIndex + ' interrupted (no turn_duration)',
-      timeSeconds: null, flags: ['partial'] });
+    if (isSubagent) {
+      /**
+       * A subagent transcript has NO turn bookkeeping at all.
+       *
+       * Measured on this machine's four subagent transcripts: record types are only
+       * `assistant` / `user` / `attachment` — not one `system:turn_duration` among 1597
+       * lines, because a subagent is one uninterrupted agent loop, not a turn-based chat.
+       * So the absence of a closer is a property of the SOURCE, not evidence of a crash,
+       * and labelling it `interrupted` would put a false statement in the ledger.
+       *
+       * The turn is closed `completed` at the last record's timestamp — the only end the
+       * transcript actually carries. Its turns remain `derived` above, which is the honest
+       * label for them either way.
+       */
+      last.endReason = 'completed';
+      last.endedAt = records[records.length - 1]?.startedAt;
+    } else {
+      last.endReason = 'interrupted';
+      records.push({ recordId: rid('turn-abort:' + last.turnIndex), kind: 'turn-end',
+        orderIndex: records.length, turnIndex: last.turnIndex, text: 'turn ' + last.turnIndex + ' interrupted (no turn_duration)',
+        timeSeconds: null, flags: ['partial'] });
+    }
   }
   if (!startedAt) startedAt = objs.find((o) => o.timestamp)?.timestamp
     ? iso(objs.find((o) => o.timestamp).timestamp) : undefined;
@@ -371,6 +401,13 @@ export function normalizeClaude(ref: SessionRef, lines: RawLine[]): NormSession 
   records.sort((a, b) => a.orderIndex - b.orderIndex);
   const session: NormSession = {
     source: 'claude-code', sessionId: ref.sessionId, cwd, gitBranch, cliVersion, capabilities,
+    // A subagent's identity comes from the ref, never from the records: every record in a
+    // subagent transcript repeats the PARENT's `sessionId`, so reading it here would
+    // overwrite `ref.sessionId` with the parent's and collapse the child onto it.
+    parentSessionId: ref.parentSessionId,
+    agentNickname: ref.agentNickname,
+    subagentDepth: ref.subagentDepth,
+    spawnCallId: ref.spawnCallId,
     startedAt, endedAt, turns, steps, records, diagnostics: diag,
   };
   if (costUsd !== undefined) {

@@ -29,6 +29,23 @@ export interface VaultMeta {
   complete: boolean;
   ingestedAt: number;
   strategy: CopyStrategy;
+  /**
+   * Subagent identity, recorded ONLY when the capture has it.
+   *
+   * `sessionId` alone is not enough to rebuild the tree: a subagent's id is derived from
+   * its parent (`<parent>--sub-<agentId>`), so the parent link has to be stored too, or a
+   * replayed capture has to re-derive it from `sourcePath`'s layout — which is exactly the
+   * fragile part. `spawnCallId` is the parent's `tool_use.id` and cannot be re-derived at
+   * all: the capture holds the subagent transcript and its `.meta.json` sidecar, but the
+   * parent's `Agent` record is not part of this capture.
+   *
+   * Absent for root conversations, and absent from every meta.json written before this
+   * field existed — both are valid, so every read treats undefined as "no identity".
+   */
+  parentSessionId?: string;
+  agentNickname?: string;
+  subagentDepth?: number;
+  spawnCallId?: string;
 }
 
 export class Vault {
@@ -76,6 +93,13 @@ export class Vault {
       complete: this.strategy === 'full-copy',
       ingestedAt: Date.now(),
       strategy: this.strategy,
+      // Spread conditionally so a root conversation's meta.json keeps its exact shape
+      // (no `"parentSessionId": undefined` leaking into the JSON as an absent key is
+      // handled by JSON.stringify anyway, but an explicit object reads clearer here).
+      ...(ref.parentSessionId ? { parentSessionId: ref.parentSessionId } : {}),
+      ...(ref.agentNickname ? { agentNickname: ref.agentNickname } : {}),
+      ...(typeof ref.subagentDepth === 'number' ? { subagentDepth: ref.subagentDepth } : {}),
+      ...(ref.spawnCallId ? { spawnCallId: ref.spawnCallId } : {}),
     };
     await fs.writeFile(this.metaPath(ref.source, ref.sessionId), JSON.stringify(meta, null, 2), { mode: 0o600 });
     return meta;

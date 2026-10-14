@@ -1,14 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api, fmtTime, type SessionRow, type SourceId, type RecordRow, type IngestJob } from './lib/api';
+import { api, fmtTime, type SessionOrigin, type SessionRow, type SourceId, type RecordRow, type IngestJob, type SubagentSummary } from './lib/api';
 import { Ledger } from './components/Ledger';
 import { Inspector } from './components/Inspector';
 import { Timeline } from './components/Timeline';
 import { ThemeSwitcher } from './components/ThemeSwitcher';
+import { SubagentMenu } from './components/SubagentMenu';
 import {
   EMPTY_NAV, canBack, canForward, pushPoint, stepBack, stepForward,
   type NavPoint, type NavState,
 } from './lib/navstack';
 import { ancestorsOf, buildSessionTree, collectBranch, flattenTree } from './lib/sessionTree';
+import { messageBody, sessionTitle, subject, subagentLabel } from './lib/sessionHead';
 
 const SOURCES: Array<{ id: SourceId | 'all'; label: string }> = [
   { id: 'all', label: '全部' },
@@ -294,10 +296,12 @@ export function App() {
   /**
    * Open a session by id alone — used by the subagent jump link and the 返回父会话 link.
    *
-   * Subagents are ordinary sessions here (the adapter keys each rollout by `payload.id`),
-   * so this is a lookup plus the same state change a sidebar click makes.
+   * Subagents are ordinary sessions here (codex keys each rollout by `payload.id`, claude by
+   * the derived `<parent>--sub-<agentId>`), so this is a lookup plus the same state change a
+   * sidebar click makes. Returns the row it opened, or null: `returnToParent` needs it to
+   * position the ledger on the spawning call without re-resolving the id.
    */
-  const openSessionById = useCallback(async (sessionId: string) => {
+  const openSessionById = useCallback(async (sessionId: string): Promise<SessionRow | null> => {
     let hit = sessions.find((s) => s.sessionId === sessionId) ?? null;
     if (!hit) {
       // The sidebar list is filtered and capped; fall back to a full fetch before giving up.
@@ -306,7 +310,7 @@ export function App() {
     }
     if (!hit) {
       setError('找不到会话 ' + sessionId + '（可能尚未摄入，试试「提取新轨迹」）');
-      return;
+      return null;
     }
     setError(null);
     setFilter(hit.source);
@@ -315,11 +319,99 @@ export function App() {
     setJumpTo(null);
     setInspOpen(true);
     pushNav({ source: hit.source, sessionId: hit.sessionId, recordId: null });
+    return hit;
   }, [sessions, pushNav]);
 
   // Known session ids, so a jump link is only rendered when it actually resolves.
   const knownSessions = useMemo(() => new Set(sessions.map((s) => s.sessionId)), [sessions]);
   const hasSession = useCallback((id: string) => knownSessions.has(id), [knownSessions]);
+
+  /**
+   * Where the selected session was spawned from, and the parent's ledger row for the call
+   * that spawned it.
+   *
+   * Resolved by the SERVER because the parent's transcript is not loaded here: Claude's link
+   * is a column on the child (`spawn_call_id`), and Codex's has to be searched for inside the
+   * parent's spawn calls. Either way the client cannot derive it from what it holds.
+   */
+  const [origin, setOrigin] = useState<SessionOrigin | null>(null);
+  useEffect(() => {
+    if (!sel?.parentSessionId) { setOrigin(null); return; }
+    let alive = true;
+    api.session(sel.source, sel.sessionId).then((r) => {
+      if (alive) setOrigin(r.origin ?? null);
+    }).catch(() => { if (alive) setOrigin(null); });
+    return () => { alive = false; };
+  }, [sel?.source, sel?.sessionId, sel?.parentSessionId]);
+
+  /**
+   * Subagent → parent: reopen the parent AND select the call that spawned this session.
+   *
+   * Opening alone would leave the user at the parent's first page — hundreds of rows away
+   * from the one row that explains why this subagent exists. When the spawn row cannot be
+   * found (an old capture, or a parent whose spawning record was never ingested) the trip
+   * still happens; only the positioning is skipped, and the button says so.
+   */
+  const returnToParent = useCallback(async () => {
+    const parentId = sel?.parentSessionId;
+    if (!parentId) return;
+    const hit = await openSessionById(parentId);
+    // `openSessionById` clears the ledger position on purpose (a fresh session), so the
+    // jump has to be issued after it — same ordering rule as the card hover panel.
+    if (hit && origin?.spawnRecordId) jumpToSessionRecord(hit, origin.spawnRecordId);
+  }, [sel, origin, openSessionById, jumpToSessionRecord]);
+
+  /**
+   * The subagent menu's data for whichever session is open.
+   *
+   * The list is the SIBLING set on a subagent's page and the CHILD set on a conversation's,
+   * which is one decision rather than two: what the menu switches between is always "the
+   * other subagents of the same parent". A subagent that itself spawned subagents (codex
+   * nests to depth 4) is still reached through its own header when opened directly, and
+   * through the sidebar tree — the menu answers "who else worked on this", not "what did
+   * this one spawn".
+   *
+   * Both the parent row and the sibling list are fetched, because the header's breadcrumb is
+   * `父代理 / 子代理` and the parent's own subject is not derivable from anything the child
+   * carries. `alive` guards the pair: selecting a second session mid-flight must not let the
+   * first response overwrite the second one's breadcrumb.
+   */
+  const [subagents, setSubagents] = useState<SubagentSummary[]>([]);
+  const [parentRow, setParentRow] = useState<SessionRow | null>(null);
+  const [subLoading, setSubLoading] = useState(false);
+  /** The menu's request failed — as opposed to "this session has no subagents". */
+  const [subError, setSubError] = useState(false);
+  useEffect(() => {
+    if (!sel) { setSubagents([]); setParentRow(null); setSubLoading(false); return; }
+    const parentId = sel.parentSessionId;
+    let alive = true;
+    setSubLoading(true);
+    setSubError(false);
+    // A failed list is NOT an empty list. Reporting it as one makes a menu that is simply
+    // absent look like a session with no subagents — which is what a server started before
+    // this endpoint existed looks like, and there is no other symptom to tell them apart.
+    const kids = (source: SourceId, id: string) =>
+      api.subagents(source, id)
+        .then((r) => r.subagents ?? [])
+        .catch((e) => { if (alive) setSubError(true); throw e; });
+    const done = (list: SubagentSummary[], parent: SessionRow | null) => {
+      if (!alive) return;
+      setSubagents(list);
+      setParentRow(parent);
+      setSubLoading(false);
+    };
+    if (parentId) {
+      // On a subagent's page: the parent's row for the breadcrumb, the parent's children for
+      // the switcher. Two requests, issued together — neither needs the other's answer.
+      Promise.all([
+        api.session(sel.source, parentId).then((r) => r.session).catch(() => null),
+        kids(sel.source, parentId).catch(() => [] as SubagentSummary[]),
+      ]).then(([parent, siblings]) => done(siblings, parent));
+    } else {
+      kids(sel.source, sel.sessionId).catch(() => [] as SubagentSummary[]).then((own) => done(own, null));
+    }
+    return () => { alive = false; };
+  }, [sel?.source, sel?.sessionId]);
 
   const visible = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -437,11 +529,46 @@ export function App() {
       .finally(() => { peekBusy.current.delete(s.sessionId); });
   }, []);
 
+  /**
+   * How wide the floating ← / → + appearance cluster is, in pixels.
+   *
+   * That cluster is `position:fixed` over the header's right edge, so the header's own
+   * right-hand control (the subagent menu) renders UNDERNEATH it. Its width is not a
+   * constant: the appearance switcher prints 浅色 / 深色 / 系统 here and System / Light /
+   * Dark in another locale, so a hard-coded padding collides as soon as the labels change.
+   * Measuring it is one ResizeObserver and stays right forever.
+   */
+  const [chromeW, setChromeW] = useState(0);
+  const chromeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = chromeRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => setChromeW(Math.round(el.getBoundingClientRect().width) + 24);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /**
+   * The header's subagent switcher, rendered only when there is something to switch between
+   * (or when the list could not be read — see `SubagentMenu`'s error state).
+   *
+   * One element, placed twice: after the title on a conversation, where it is right-aligned
+   * by its own auto margin, and INSIDE the `父会话 / 子代理` pair on a subagent's page, where
+   * that margin is overridden so the phrase stays together.
+   */
+  const subMenu = (subagents.length > 0 || subError) ? (
+    <SubagentMenu items={subagents} activeId={sel?.sessionId ?? ''}
+      selfLabel={sel ? subagentLabel(sel) : ''} loading={subLoading} error={subError}
+      onPick={(id) => void openSessionById(id)} />
+  ) : null;
+
   return (
     <div className="app">
       {/* ← / → sit immediately left of the appearance switcher: both are global chrome,
           and the tour the arrows retrace is exactly what the links below create. */}
-      <div className="top-right">
+      <div className="top-right" ref={chromeRef}>
         <div className="nav-btns" role="group" aria-label="导航历史">
           <button type="button" className="nav-btn" onClick={goBack} disabled={!canBack(nav)}
             title="后退：上一个会话 / 消息">
@@ -639,16 +766,45 @@ export function App() {
         ) : (
           <>
             <header className="session-head">
-              <div className="head-main">
+              {/* The right inset keeps the header's own control clear of the floating
+                  ← / → cluster (see `chromeW`), which is drawn over this corner. */}
+              <div className="head-main" style={chromeW ? { paddingRight: chromeW } : undefined}>
                 <span className={'pill ' + sel.source}>{srcLabel(sel.source)}</span>
-                <h2 title={sel.sessionId}>{sel.sessionId}</h2>
-                {/* A subagent's rollout has a parent; make the trip back one click. */}
-                {sel.parentSessionId && (
-                  <button type="button" className="link"
-                    title={'打开父会话 ' + sel.parentSessionId}
-                    onClick={() => void openSessionById(sel.parentSessionId!)}>
-                    ← 返回父会话{sel.agentNickname ? '（' + sel.agentNickname + '）' : ''}
-                  </button>
+                {sel.parentSessionId ? (
+                  /* A subagent's page reads `父会话 / 子代理` as ONE phrase, so the two halves
+                     sit next to each other: the parent title on the left, the subagent's own
+                     name in the switcher right after a slash. Sending the switcher to the far
+                     end of the row (as a conversation's menu does) split the phrase across
+                     the full width and left the connection to be inferred.
+                     The parent is also the way back, and it lands on the call that spawned
+                     this session rather than merely on the parent's first page: that call is
+                     the row the user is looking for when they walk back. */
+                  <div className="head-pair">
+                    <h2 className="crumb">
+                      <button type="button" className="crumb-p"
+                        title={'父会话：' + (parentRow ? sessionTitle(parentRow) : sel.parentSessionId)
+                          + '（打开父会话' + (origin?.spawnRecordId ? '，并定位到派生本次的调用' : '）')}
+                        onClick={() => void returnToParent()}>
+                        {parentRow ? sessionTitle(parentRow) : sel.parentSessionId}
+                      </button>
+                      <span className="crumb-sep" aria-hidden="true">/</span>
+                    </h2>
+                    {subMenu}
+                  </div>
+                ) : (
+                  /* The conversation's own menu sits right after the title for the SAME
+                     reason: a control pinned to the far end of a 1500px row reads as unrelated
+                     to the title, and the eye has to travel the whole width to connect the two.
+                     No slash here — this is "this conversation and what it spawned", not a
+                     parent/child pair. */
+                  <div className="head-pair">
+                    {/* Title = the first real message. The id is not a title — it is a
+                        fingerprint, and it moved to the properties row below where a
+                        fingerprint belongs. The full (possibly 7k-character) message is on
+                        the tooltip; the visible text is the one-line subject. */}
+                    <h2 title={sel.title ?? sel.sessionId}>{sessionTitle(sel)}</h2>
+                    {subMenu}
+                  </div>
                 )}
               </div>
               <CapabilityMatrix caps={sel.capabilities} diagnostics={sel.diagnostics} />
@@ -656,6 +812,9 @@ export function App() {
                 <span title={sel.cwd}>{sel.cwd ?? '—'}</span>
                 {sel.cliVersion && <span className="badge">CLI {sel.cliVersion}</span>}
                 <span>{fmtTime(sel.startedAt)}</span>
+                {/* The id lives here now: one click to copy it, always in the same place,
+                    and never mistaken for the conversation's name. */}
+                <span className="h-sid" title={'sessionId ' + sel.sessionId}>sessionId {sel.sessionId}</span>
               </div>
             </header>
             <Timeline source={sel.source} sessionId={sel.sessionId} selected={selectedRecord}
@@ -711,41 +870,6 @@ function diagCount(d: any): number {
 }
 function srcLabel(s: SourceId): string {
   return s === 'codex' ? 'Codex' : s === 'claude-code' ? 'Claude' : 'DSH';
-}
-
-/**
- * Card subject from a possibly very long first user message.
- *
- * Measured on this machine: the median first message is 37 characters, but the longest is
- * 7457 (a pasted spec). A fixed-width cut lands mid-word and reads as noise, so this
- * prefers, in order: the first non-blank line with markdown structure stripped, then the
- * first sentence of it, and only then a hard cut at a word boundary.
- *
- * The whole message is never returned here — it lives in the hover panel, which scrolls.
- */
-function subject(text: string, max = 110): string {
-  const firstLine = (text ?? '').split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-  // Headings, quotes and bullets are document structure, not the subject of the request.
-  const clean = firstLine.replace(/^[#>\-*+\s]+/, '').replace(/\*\*/g, '').trim();
-  if (clean.length <= max) return clean;
-  const head = clean.slice(0, max);
-  const sentence = head.search(/[.。!?！？][)\]]?\s/);
-  if (sentence > 20) return head.slice(0, sentence + 1);
-  const word = head.lastIndexOf(' ');
-  return (word > max * 0.5 ? head.slice(0, word) : head) + '…';
-}
-
-/**
- * Hover-panel body: keep far more than the card, and say so when it is cut.
- *
- * The panel is scrollable, so there is no layout reason to hide the rest — but a 7k pasted
- * spec would bury every other message, so it is capped with an explicit "已截断" marker and
- * the real length, rather than silently ending mid-sentence.
- */
-function messageBody(text: string, max = 1200): string {
-  const t = (text ?? '').replace(/\r\n/g, '\n');
-  if (t.length <= max) return t;
-  return t.slice(0, max).trimEnd() + '\n…（已截断，全文 ' + t.length + ' 字符）';
 }
 
 /** Last N lines of a captured stream, so the error banner stays short. */

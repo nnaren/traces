@@ -21,6 +21,24 @@ export async function writeClaude(dir: string, name: string, lines: Array<any | 
   return p;
 }
 
+/**
+ * A Claude session's subagent transcript and the spawn sidecar beside it —
+ * `projects/<slug>/<session>/subagents/agent-<agentId>.{jsonl,meta.json}`.
+ *
+ * `meta` is the spawn descriptor Claude writes (`toolUseId` / `description` / `spawnDepth`);
+ * the transcript's own first line repeats the PARENT's `sessionId`, exactly as measured.
+ */
+export async function writeClaudeSubagent(
+  dir: string, sessionId: string, agentId: string, meta: Record<string, any>, lines: Array<any | string>,
+): Promise<string> {
+  const d = path.join(dir, 'projects', '-tmp-proj', sessionId, 'subagents');
+  await fs.mkdir(d, { recursive: true });
+  const body = lines.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n') + '\n';
+  await fs.writeFile(path.join(d, `agent-${agentId}.jsonl`), body);
+  await fs.writeFile(path.join(d, `agent-${agentId}.meta.json`), JSON.stringify(meta, null, 2));
+  return path.join(d, `agent-${agentId}.jsonl`);
+}
+
 /** Minimal concatenated-zstd writer: one independent frame per chunk. */
 export async function writeDsh(dir: string, name: string, chunks: string[]): Promise<string> {
   const zlib = await import('node:zlib');

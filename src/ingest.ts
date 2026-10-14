@@ -137,6 +137,21 @@ export async function ingest(opts: IngestOptions): Promise<IngestReport> {
           ' records=' + report.records[adapter.id] +
           (report.superseded[adapter.id] ? ' superseded=' + report.superseded[adapter.id] : ''));
     }
+
+    /**
+     * Cross-session reconciliation, run ONCE after every source is in.
+     *
+     * DSH is the one source whose parent→child link cannot be built while a session is being
+     * written: the child's header names its parent, but the call that spawned it lives in the
+     * PARENT's log, which is read separately — and in directory order the child is written
+     * first. So the pairing is deferred to here, where both sides exist.
+     *
+     * It is idempotent: a child already carrying `spawn_call_id` is not selected, so
+     * re-running ingest cannot rewrite a link, and a run that finds nothing to do costs one
+     * indexed query.
+     */
+    const linked = store.attachDshSpawnCalls();
+    if (linked > 0) log('[dsh] 子代理↔派生调用 已配对=' + linked);
   } finally {
     store.close();
   }

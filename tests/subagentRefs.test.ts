@@ -64,3 +64,55 @@ describe('subagent refs in a tool call', () => {
     expect(refs).toHaveLength(1);
   });
 });
+
+/**
+ * Claude Code cannot be resolved from the payload at all: an `Agent` call's RESULT is the
+ * subagent's final prose — 2764 chars of report, not one id (measured on the 996c7dee
+ * session) — and its arguments carry the prompt. The link lives in the spawn's sidecar,
+ * which the ingest stores as the child's `spawn_call_id`, and the record detail endpoint
+ * resolves it back into `record.subagents`.
+ */
+describe('claude code subagent refs, resolved by the server', () => {
+  const CHILD_ID = '996c7dee-4e92-4730-b5a3-f2c4131239a4--sub-ac5961e309227d752';
+  const CALL = 'chatcmpl-tool-93249bc52a95581f';
+
+  function agentRec(callId = CALL): RecordRow {
+    return {
+      recordId: 'r', kind: 'tool', orderIndex: 1, timeSeconds: null, isError: false, callId,
+      usage: null, flags: [], summary: 'Agent(...)',
+      tool: {
+        callId, name: 'Agent',
+        inputRaw: '{"description":"执行评审任务 ReviewTask-1","subagent_type":"general-purpose","prompt":"go"}',
+        outputText: '[{"type":"text","text":"评审完成。结果已写入 review_result_1.json（无确认缺陷）。"}]',
+      },
+    } as unknown as RecordRow;
+  }
+
+  it('links the children the server resolved for this call', () => {
+    const rec = { ...agentRec(), subagents: [{ sessionId: CHILD_ID, spawnCallId: CALL, agentNickname: 'ReviewTask-1' }] };
+    const refs = subagentRefs(rec);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].id).toBe(CHILD_ID);
+    expect(refs[0].nickname).toBe('ReviewTask-1');
+  });
+
+  it('ignores children the server attached to a DIFFERENT call', () => {
+    const rec = { ...agentRec(), subagents: [{ sessionId: CHILD_ID, spawnCallId: 'chatcmpl-tool-other' }] };
+    expect(subagentRefs(rec)).toHaveLength(0);
+  });
+
+  it('returns nothing for an `Agent` call with no child ingested yet', () => {
+    expect(subagentRefs({ ...agentRec(), subagents: [] })).toHaveLength(0);
+    expect(subagentRefs(agentRec())).toHaveLength(0);
+  });
+
+  it('merges a server-resolved child with a payload-derived one instead of dropping either', () => {
+    const rec = {
+      ...agentRec(),
+      tool: { callId: CALL, name: 'wait_agent', inputRaw: '{"targets":["01a09624-2596-73e3-bee8-d7258d9f2880"]}' },
+      subagents: [{ sessionId: CHILD_ID, spawnCallId: CALL, agentNickname: 'ReviewTask-1' }],
+    } as unknown as RecordRow;
+    const refs = subagentRefs(rec);
+    expect(refs.map((r) => r.id).sort()).toEqual([CHILD_ID, '01a09624-2596-73e3-bee8-d7258d9f2880'].sort());
+  });
+});

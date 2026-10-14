@@ -35,10 +35,12 @@ type LaneIndex = 0 | 1 | 2;
  *        neither reaches this function today: the server keeps them out of `spans`
  *        precisely so the 模型 lane can be drawn from `steps` (one block per model
  *        call) instead of double-rendering each call twice.
- * 工具 = tool processing.
+ * 工具 = tool processing. `subagent` shares that lane — delegating to another agent IS work
+ *        the model asked for — but carries its own colour, so a delegation-heavy trajectory
+ *        is legible as such instead of drowning in the tool amber.
  */
 function laneFor(kind: string): LaneIndex {
-  if (kind === 'tool' || kind === 'subtool') return 2;
+  if (kind === 'tool' || kind === 'subtool' || kind === 'subagent') return 2;
   if (kind === 'message' || kind === 'reasoning') return 1;
   // A hook injection is neither the user's input nor the model's output: an external rule
   // spoke between them. 输入 is the honest lane — it is what the model was fed, and what it

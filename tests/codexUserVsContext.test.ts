@@ -90,11 +90,32 @@ describe('codex: human input vs injected context', () => {
     // The echo must match on CONTENT, not merely exist at the next ordinal.
     const s = run([
       meta, started,
-      userMsg('<subagent_notification>{"a":1}</subagent_notification>', 10),
+      userMsg('<skill>\n<name>x</name>\n</skill>', 10),
       echo('something else entirely', 11),
     ]);
     expect(s.records.filter((x) => x.kind === 'user')).toHaveLength(0);
     expect(s.records.filter((x) => x.kind === 'context')).toHaveLength(1);
+  });
+
+  /**
+   * `<subagent_notification>` is the one injected role=user message that is NOT 上下文: it is
+   * a finished subagent's report handed back to the parent, so it is filed as 子代理. The
+   * user/context decision itself is unchanged — it is still not a human turn, and it still
+   * does not open one.
+   */
+  it('files a subagent notification as 子代理, not as 上下文 or 用户', () => {
+    const s = run([
+      meta, started,
+      userMsg('<subagent_notification>{"a":1}</subagent_notification>', 10),
+    ]);
+    expect(s.records.filter((x) => x.kind === 'user')).toHaveLength(0);
+    expect(s.records.filter((x) => x.kind === 'context')).toHaveLength(0);
+    const subs = s.records.filter((x) => x.kind === 'subagent');
+    expect(subs).toHaveLength(1);
+    expect(subs[0].detailText).toContain('<subagent_notification>');
+    // It is not a tool call: no call id, no arguments, nothing to pair.
+    expect(subs[0].toolName).toBeUndefined();
+    expect(subs[0].callId).toBeUndefined();
   });
 
   it('still counts every message — nothing is dropped by the reclassification', () => {

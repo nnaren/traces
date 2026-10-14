@@ -1,21 +1,26 @@
-import type { RecordRow } from './api';
+import type { RecordRow, SubagentChild } from './api';
 
 /**
  * Session ids a tool call refers to as subagents.
  *
- * Codex drives subagents through ordinary tool calls, and the child conversation's id is
- * right there in the payload:
+ * Two sources spawn subagents, and they record the link in different places.
+ *
+ * **Codex** puts the child's thread id right in the parent's tool payload:
  *
  *   spawn_agent  → result `{"agent_id":"01a09624-…","nickname":"Huygens"}`
  *   wait_agent   → input  `{"targets":["01a09624-…"],"timeout_ms":360000}`
  *
- * A subagent rollout is a session of its own (the adapter keys it by `payload.id`), so that
- * id is directly openable — which is the whole point of surfacing it.
+ * **Claude Code** cannot: an `Agent` call's result is the subagent's final prose (measured —
+ * 2764 chars of report text, not one id). Its `tool_use` input carries the prompt, not the
+ * child's identity. The only link is in the spawn's own sidecar,
+ * `projects/<slug>/<session>/subagents/agent-<id>.meta.json` → `toolUseId`, which IS the
+ * parent's `tool_use.id`. The ingest carries that across as `SessionRow.spawnCallId`, so a
+ * child is found by matching the CALL's id instead of digging through its payload.
  *
- * Both the input and the output are scanned, because which one carries the id depends on
- * the tool: the spawner learns the id from the RESULT, while the waiter is handed it in its
- * ARGUMENTS. Values are collected from nested structures rather than a fixed shape, so a
- * Codex version that renames a wrapper object still works.
+ * Both are collected here so the inspector renders one uniform jump link.
+ *
+ * Values are collected from nested structures rather than a fixed shape, so a Codex version
+ * that renames a wrapper object still works.
  */
 export interface SubagentRef {
   id: string;
@@ -23,10 +28,25 @@ export interface SubagentRef {
   nickname?: string;
 }
 
-export function subagentRefs(rec: RecordRow): SubagentRef[] {
+/** The child sessions a spawn produced. Shape lives with the API types it comes from. */
+export type { SubagentChild } from './api';
+
+/**
+ * `children` defaults to what the record detail response already carries, so the caller
+ * cannot forget to pass the server's answer and silently lose the link.
+ */
+export function subagentRefs(rec: RecordRow, children: SubagentChild[] = rec.subagents ?? []): SubagentRef[] {
   const found = new Map<string, SubagentRef>();
   collect(rec.tool?.outputText, found);
   collect(rec.tool?.inputRaw, found);
+  // Children the SERVER resolved for this call. Their link is a column, not something to
+  // parse, and it does not depend on the child being inside the browser's capped session
+  // list — so this path works even when the payload carries no id at all.
+  for (const c of children) {
+    if (!c.sessionId) continue;
+    if (c.spawnCallId && rec.callId && c.spawnCallId !== rec.callId) continue;
+    found.set(c.sessionId.toLowerCase(), { id: c.sessionId, nickname: c.agentNickname ?? undefined });
+  }
   return [...found.values()];
 }
 

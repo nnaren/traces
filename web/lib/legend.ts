@@ -27,6 +27,10 @@ export const LEGEND: readonly LegendGroup[] = [
   { label: '上下文', kinds: ['context', 'compacted'], sw: 'context' },
   { label: '模型', kinds: ['message'], sw: 'model' },
   { label: '工具', kinds: ['tool', 'subtool'], sw: 'tool' },
+  // Its OWN switch, not part of 工具: a subagent call is a delegation decision, and folding
+  // it into 工具 makes a trajectory that is mostly delegation unreadable — you cannot switch
+  // the noise off without also switching the shape off. Magenta, clear of the tool amber.
+  { label: '子代理', kinds: ['subagent'], sw: 'subagent' },
   { label: '推理', kinds: ['reasoning'], sw: 'reasoning' },
   { label: '钩子', kinds: ['hook'], sw: 'hook' },
 ];

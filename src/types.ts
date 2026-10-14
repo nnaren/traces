@@ -63,6 +63,16 @@ export interface SessionRef {
   agentNickname?: string;
   /** Codex subagents: spawn depth; 1 = spawned by the root conversation. */
   subagentDepth?: number;
+  /**
+   * The PARENT tool call that spawned this session, as the parent wrote it.
+   *
+   * Codex puts the child's thread id in the parent's tool payload, so the UI can find the
+   * child from the record alone. Claude Code does not: an `Agent` call's result is the
+   * subagent's final prose, with no id anywhere in it. The only key is in the spawn's own
+   * sidecar (`subagents/agent-<id>.meta.json` → `toolUseId`), which is the parent's
+   * `tool_use.id`. Carrying it here is what lets the UI draw the same jump link.
+   */
+  spawnCallId?: string;
 }
 
 export interface TrajectorySourceAdapter {
@@ -93,7 +103,22 @@ export interface TrajectorySourceAdapter {
 
 export type NormRecordKind =
   | 'system' | 'user' | 'context' | 'compacted' | 'message' | 'reasoning'
-  | 'tool' | 'subtool' | 'request-header' | 'turn-end' | 'session-end' | 'hook';
+  | 'tool' | 'subtool'
+  /**
+   * A call that manages a SUBAGENT conversation — spawning one, waiting on it, messaging it,
+   * listing, closing, interrupting — plus (codex only) the notification a finished subagent
+   * injects back into its parent.
+   *
+   * Split from `tool` because "the agent delegated this to another agent" is a different
+   * fact from "the agent ran a command", and a trajectory with 1675 `wait_agent` calls
+   * filed as ordinary tools loses the shape of the delegation entirely. The tool name,
+   * arguments, result and duration stay on the record — only the KIND differs, so the
+   * inspector's 参数/结果 tabs are unchanged.
+   *
+   * Which tool names qualify is per source — see `src/subagent.ts`.
+   */
+  | 'subagent'
+  | 'request-header' | 'turn-end' | 'session-end' | 'hook';
 
 /**
  * A hook's text injection into the conversation (Codex `HookPrompt`).
@@ -241,6 +266,8 @@ export interface NormSession {
   agentNickname?: string;
   /** Codex subagents: spawn depth; 1 = spawned by the root conversation. */
   subagentDepth?: number;
+  /** The parent tool call that spawned this session (see SessionRef.spawnCallId). */
+  spawnCallId?: string;
   /** R1: EFFECTIVE ordering for this session, resolved at ingest. */
   capabilities: SourceCapabilities;
   startedAt?: number;

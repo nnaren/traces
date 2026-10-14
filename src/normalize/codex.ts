@@ -11,6 +11,7 @@ import type {
 } from '../types.ts';
 import { CODEX_CAPABILITIES } from '../sources/codex.ts';
 import { parseLine } from '../sources/stableRead.ts';
+import { isSubagentNotification, isSubagentTool } from '../subagent.ts';
 
 const iso = (t?: string): number | undefined => (t ? Date.parse(t) : undefined);
 
@@ -302,8 +303,17 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
           } else {
             // Injected input must not fabricate a turn of its own; mirror the developer
             // branch and attach to whatever turn is already open.
-            records.push({ recordId: rid('ctx' + orderOf(p)), kind: 'context', orderIndex: orderOf(p),
-              turnIndex: Math.max(currentTurn, 0), text: firstLine(text), detailText: text,
+            //
+            // `<subagent_notification>` is the one injected input that is really about a
+            // subagent: a finished child's report handed back to the parent. Filed as plain
+            // 上下文 it reads as unexplained bulk, and the turn it drove looks unmotivated —
+            // so it is marked 子代理, which is the only source-level difference here: Claude
+            // returns the report inside the `Agent` result and DSH inside `subagent`'s, so
+            // neither of them produces a record of this shape at all.
+            const fromSubagent = isSubagentNotification(text);
+            records.push({ recordId: rid('ctx' + orderOf(p)), kind: fromSubagent ? 'subagent' : 'context',
+              orderIndex: orderOf(p), turnIndex: Math.max(currentTurn, 0),
+              text: firstLine(text), detailText: text,
               timeSeconds: null, startedAt: ts, flags: [] });
           }
         } else if (role === 'assistant') {
@@ -375,7 +385,11 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
         const inputRaw = typeof payload.arguments === 'string' ? payload.arguments
           : typeof payload.input === 'string' ? payload.input : safeJson(payload.arguments ?? payload.input);
         const rec: NormRecord = {
-          recordId: rid('tool' + (payload.call_id ?? orderOf(p))), kind: 'tool', orderIndex: orderOf(p),
+          recordId: rid('tool' + (payload.call_id ?? orderOf(p))),
+          // Codex drives subagents through a whole TOOL FAMILY, and `wait_agent` alone is 8x
+          // everything else combined — filed as ordinary tools they bury the delegation
+          // structure they exist to show.
+          kind: isSubagentTool('codex', name) ? 'subagent' : 'tool', orderIndex: orderOf(p),
           turnIndex: t, stepIndex: currentStep,
           text: name + '(' + truncate(inputRaw ?? '', 80) + ')', detailText: inputRaw,
           toolName: name, callId: payload.call_id, timeSeconds: null, startedAt: ts,
@@ -415,7 +429,8 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
   }
 
   for (const rec of records) {
-    if (rec.kind === 'tool' && rec.callId && rec.tool && !rec.tool.outputText) {
+    // `subagent` is a call like any other: an unresolved one is just as unresolved.
+    if ((rec.kind === 'tool' || rec.kind === 'subagent') && rec.callId && rec.tool && !rec.tool.outputText) {
       rec.tool.unresolved = true; rec.flags.push('unresolved-call'); diag.unresolvedCallCount++;
     }
   }
@@ -449,7 +464,9 @@ export function normalizeCodex(ref: SessionRef, lines: RawLine[]): NormSession {
       if (r.kind === 'user') break;
       if (r.kind === 'hook') break;
       if (r.kind === 'session-end') break;
-      if (r.kind === 'tool' && r.callId) {
+      // A hook's reaction may well BE a subagent call (a rule that says "go ask the critic"), so
+      // this has to see `subagent` too — otherwise the link silently skips over it.
+      if ((r.kind === 'tool' || r.kind === 'subagent') && r.callId) {
         hookRec.hook.triggeredCallId = r.callId;
         r.flags.push('hook-triggered');
         break;

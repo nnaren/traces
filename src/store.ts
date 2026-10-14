@@ -104,7 +104,9 @@ export class Store {
         source TEXT NOT NULL, session_id TEXT NOT NULL,
         vault_path TEXT, source_path TEXT, cwd TEXT, git_branch TEXT, cli_version TEXT,
         -- Codex subagents: the spawning conversation, its nickname and the spawn depth.
-        parent_session_id TEXT, agent_nickname TEXT, subagent_depth INTEGER,
+        -- Claude subagents additionally record the spawning Agent call's id, which is the
+        -- ONLY parent-child key the UI can use (Claude's tool result carries no child id).
+        parent_session_id TEXT, agent_nickname TEXT, subagent_depth INTEGER, spawn_call_id TEXT,
         started_at INTEGER, ended_at INTEGER, first_seen_at INTEGER NOT NULL, last_ingested_at INTEGER NOT NULL,
         capabilities_json TEXT NOT NULL, diagnostics_json TEXT NOT NULL DEFAULT '{}',
         record_count INTEGER DEFAULT 0, turn_count INTEGER DEFAULT 0, step_count INTEGER DEFAULT 0,
@@ -167,6 +169,21 @@ export class Store {
     if (!cols('records').includes('hook_json')) {
       this.db.exec('ALTER TABLE records ADD COLUMN hook_json TEXT');
     }
+    // The spawning tool call of a subagent. Same reasoning as the columns above: the link
+    // lives in the SOURCE's layout (claude's `subagents/*.meta.json` → `toolUseId`), never
+    // in the transcript's own bytes, so it has to be carried explicitly.
+    if (!cols('sessions').includes('spawn_call_id')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN spawn_call_id TEXT');
+    }
+    // The other half of the parent↔child link: `sessions.spawn_call_id` points AT a record,
+    // and this index is how it is found again — every "返回父会话" click has to resolve it.
+    // Without it the lookup degrades into a scan of the parent's whole record set.
+    this.db.exec('CREATE INDEX IF NOT EXISTS records_by_call ON records(source, session_id, call_id)');
+    // The reverse direction of the same link: which child session did this call spawn?
+    // Resolved server-side so the inspector's jump link does not depend on the caller's
+    // session LIST — that list is capped and time-ordered, so a child that fell outside it
+    // would silently have no link at all.
+    this.db.exec('CREATE INDEX IF NOT EXISTS sessions_by_spawn_call ON sessions(source, spawn_call_id)');
   }
 
   /**
@@ -212,20 +229,21 @@ export class Store {
       this.db.prepare('DELETE FROM records_fts WHERE session_id=? AND source=?').run(s.sessionId, s.source);
       this.db.prepare(`
         INSERT INTO sessions (source, session_id, vault_path, source_path, cwd, git_branch, cli_version,
-          parent_session_id, agent_nickname, subagent_depth,
+          parent_session_id, agent_nickname, subagent_depth, spawn_call_id,
           started_at, ended_at, first_seen_at, last_ingested_at, capabilities_json, diagnostics_json,
           record_count, turn_count, step_count)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(source, session_id) DO UPDATE SET
           vault_path=excluded.vault_path, source_path=excluded.source_path, cwd=excluded.cwd,
           git_branch=excluded.git_branch, cli_version=excluded.cli_version,
           parent_session_id=excluded.parent_session_id, agent_nickname=excluded.agent_nickname,
-          subagent_depth=excluded.subagent_depth, started_at=excluded.started_at,
+          subagent_depth=excluded.subagent_depth, spawn_call_id=excluded.spawn_call_id,
+          started_at=excluded.started_at,
           ended_at=excluded.ended_at, last_ingested_at=excluded.last_ingested_at,
           capabilities_json=excluded.capabilities_json, diagnostics_json=excluded.diagnostics_json,
           record_count=excluded.record_count, turn_count=excluded.turn_count, step_count=excluded.step_count
       `).run(s.source, s.sessionId, vaultPath, sourcePath, s.cwd ?? null, s.gitBranch ?? null, s.cliVersion ?? null,
-        s.parentSessionId ?? null, s.agentNickname ?? null, s.subagentDepth ?? null,
+        s.parentSessionId ?? null, s.agentNickname ?? null, s.subagentDepth ?? null, s.spawnCallId ?? null,
         s.startedAt ?? null, s.endedAt ?? null, now, now, JSON.stringify(s.capabilities),
         JSON.stringify(s.diagnostics), s.records.length, s.turns.length, s.steps.length);
 
@@ -345,6 +363,292 @@ export class Store {
   }
 
   /**
+   * The record in `sessionId` whose tool call carries `callId`.
+   *
+   * This is how a subagent finds the row of its PARENT that spawned it, so the trip back
+   * can land on that row instead of the top of the parent's ledger. `call_id` is not unique
+   * across a session in principle (the same id appearing in input and output halves), so
+   * the first row in ledger order wins — the one that issued the call.
+   */
+  findRecordByCallId(source: SourceId, sessionId: string, callId: string): any | undefined {
+    return this.db.prepare(
+      'SELECT * FROM records WHERE source=? AND session_id=? AND call_id=? ORDER BY order_index LIMIT 1',
+    ).get(source, sessionId, callId);
+  }
+
+  /**
+   * The subagent sessions spawned by one tool call.
+   *
+   * One spawn can produce several children (three parallel `Agent` calls are three calls, but
+   * a retry or a fan-out can share one), so this returns a list rather than a single row.
+   * Claude records the link on the child (`spawn_call_id`); Codex does not, and its id is in
+   * the payload instead — the inspector merges both.
+   */
+  childSessionsByCallId(source: SourceId, callId: string): Array<{ sessionId: string; agentNickname: string | null }> {
+    return (this.db.prepare(
+      'SELECT session_id, agent_nickname FROM sessions WHERE source=? AND spawn_call_id=? ORDER BY started_at',
+    ).all(source, callId) as any[])
+      .map((r) => ({ sessionId: r.session_id, agentNickname: r.agent_nickname ?? null }));
+  }
+
+  /**
+   * The subagents ONE session spawned, in spawn order.
+   *
+   * The header's "N 个子智能体" menu is built from this rather than from the browser's copy
+   * of the session list, for the same reason the inspector's jump links are resolved
+   * server-side: `/api/sessions` is capped and time-ordered, so a child can be missing from
+   * it while being perfectly present here — "5 个子智能体" that lists 4, or a subagent that
+   * exists but cannot be opened, is worse than no menu at all.
+   *
+   * Ordered by `started_at` because that is the order the parent delegated in, which is the
+   * order a reader expects to scan. `session_id` breaks ties so two children with the same
+   * millisecond do not swap places between requests.
+   */
+  childSessions(source: SourceId, parentSessionId: string): any[] {
+    return this.db.prepare(
+      'SELECT * FROM sessions WHERE source=? AND parent_session_id=? ORDER BY started_at, session_id',
+    ).all(source, parentSessionId);
+  }
+
+  /**
+   * Total tokens per session, over the records that carry usage.
+   *
+   * `usage_json` is the one place all three sources report usage, with the same
+   * `totalTokens` key — but they report it at DIFFERENT granularities, and adding every row
+   * up is wrong by exactly a factor of two on the source that reports both:
+   *
+   *  - **dsh** writes a per-model-call total on every `message` record AND repeats that
+   *    turn's running total on the `turn-end` boundary. Measured on the biggest review
+   *    subagent in this store: its 225 messages sum to 18,538,539 and the single `turn-end`
+   *    adds the same 18,538,539 on top — 37,077,078, exactly double the real cost.
+   *  - **codex** and **claude-code** write usage ONLY on the `turn-end` boundary records, so
+   *    excluding boundaries to fix dsh would zero both of them out entirely.
+   *
+   * Both halves are therefore summed separately and the per-call one wins whenever the
+   * session reports any; that is what the CASE expressions below are for.
+   *
+   * The `json_valid` guard is not paranoia about our own writes: a source can carry a usage
+   * object we normalised into something unparsable, and one bad row would make
+   * `json_extract` throw and take the WHOLE menu down. Measured cost on this machine's store
+   * (7 codex children, ~40k records): under 5 ms.
+   *
+   * A session with no usage rows is ABSENT from the map, not mapped to 0 — "reported nothing"
+   * and "reported zero" are different facts, and the menu renders the first as a dash.
+   */
+  sessionUsageTotals(source: SourceId, sessionIds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (sessionIds.length === 0) return out;
+    const sql = `
+      SELECT session_id,
+             SUM(CASE WHEN kind IN ('turn-end', 'session-end') THEN 0
+                      ELSE COALESCE(json_extract(usage_json, '$.totalTokens'), 0) END) AS per_call,
+             SUM(CASE WHEN kind IN ('turn-end', 'session-end')
+                      THEN COALESCE(json_extract(usage_json, '$.totalTokens'), 0) ELSE 0 END) AS per_turn
+        FROM records
+       WHERE source = ? AND usage_json IS NOT NULL AND json_valid(usage_json)
+         AND session_id IN (${sessionIds.map(() => '?').join(',')})
+       GROUP BY session_id`;
+    for (const r of this.db.prepare(sql).all(source, ...sessionIds) as any[]) {
+      // Prefer the per-call sum; fall through to the per-turn one rather than to a zero,
+      // which is what a source that reports usage ONLY on its boundaries would otherwise get.
+      const sum = Number(r.per_call) > 0 ? Number(r.per_call) : Number(r.per_turn);
+      if (sum > 0) out.set(r.session_id, sum);
+    }
+    return out;
+  }
+
+  /**
+   * How many subagents each of these sessions spawned in turn (codex nests to depth 4).
+   *
+   * One grouped query rather than a lookup per row: the menu renders up to 33 children on
+   * this machine, and that is 33 round trips if done naively.
+   */
+  childCounts(source: SourceId, parentIds: string[]): Map<string, number> {
+    const out = new Map<string, number>();
+    if (parentIds.length === 0) return out;
+    const sql = `SELECT parent_session_id, COUNT(*) AS n FROM sessions
+                  WHERE source = ? AND parent_session_id IN (${parentIds.map(() => '?').join(',')})
+                  GROUP BY parent_session_id`;
+    for (const r of this.db.prepare(sql).all(source, ...parentIds) as any[]) {
+      out.set(r.parent_session_id, Number(r.n));
+    }
+    return out;
+  }
+
+  /**
+   * Attach every DSH subagent to the `subagent` call in its parent that spawned it.
+   *
+   * DSH is the awkward one of the three, and the asymmetry is the whole reason this exists:
+   *
+   *  - codex puts the child's thread id in the spawn call's RESULT, so `spawn_agent`'s
+   *    payload already names the child session;
+   *  - Claude puts it in the spawn's own sidecar (`subagents/agent-<id>.meta.json` →
+   *    `toolUseId`), which the ingest reads directly;
+   *  - DSH writes NEITHER. The child's header names its parent (`parentSession`), and the
+   *    parent's `subagent/catalog` event names the child (`childId`, `label`), but **no
+   *    event carries the `callId`** that links the two.
+   *
+   * So the link is reconstructed from the two keys DSH does write, both of which are exact:
+   *   1. `label` === the spawn call's `arguments.description` (measured: 5/5 identical);
+   *   2. `childCreatedAt` === the child's header `createdAt`, within a few tens of ms of
+   *      the `tool/call` timestamp (measured: 24–38 ms).
+   *
+   * Both must agree. `label` alone is not enough — a parent may spawn two children with the
+   * same description — and time alone is not either; the window is deliberately tight (5s)
+   * and, on a tie, the NEAREST call wins.
+   *
+   * Runs after ingest rather than during it: the child is written before the parent is read,
+   * so at write time its `spawn_call_id` cannot yet be known.
+   */
+  attachDshSpawnCalls(windowMs = 5000): number {
+    const children = this.db.prepare(
+      "SELECT session_id, parent_session_id, started_at FROM sessions WHERE source='dsh' AND parent_session_id IS NOT NULL AND spawn_call_id IS NULL",
+    ).all() as any[];
+    if (children.length === 0) return 0;
+
+    // One pass per parent: 5 children share one parent here, so re-reading the parent per
+    // child would re-read a 300-line log five times.
+    const byParent = new Map<string, any[]>();
+    for (const c of children) {
+      const list = byParent.get(c.parent_session_id) ?? [];
+      list.push(c);
+      byParent.set(c.parent_session_id, list);
+    }
+
+    const upd = this.db.prepare('UPDATE sessions SET spawn_call_id=?, agent_nickname=? WHERE source=? AND session_id=?');
+    let linked = 0;
+    for (const [parentId, kids] of byParent) {
+      const { calls, catalogs } = this.dshSpawnIndex(parentId);
+      if (calls.length === 0) continue;
+
+      for (const kid of kids) {
+        const label = catalogs.get(kid.session_id);
+        if (!label) continue;          // no catalog row → no honest pairing; better none than guessed
+        const call = this.pickSpawnCall(calls, label, kid.started_at, windowMs);
+        if (!call) continue;
+        upd.run(call.call_id, label, 'dsh', kid.session_id);
+        linked++;
+      }
+    }
+    return linked;
+  }
+
+  /** The parent's subagent calls and its `childId → label` catalog, in one pass. */
+  private dshSpawnIndex(parentId: string): { calls: any[]; catalogs: Map<string, string> } {
+    const rows = this.db.prepare(
+      "SELECT record_id, kind, call_id, started_at, summary, tool_json, detail_text, detail_blob FROM records WHERE source='dsh' AND session_id=? AND kind='subagent' ORDER BY order_index",
+    ).all(parentId) as any[];
+    const calls: any[] = [];
+    const catalogs = new Map<string, string>();
+    for (const r of rows) {
+      if (r.call_id) {
+        calls.push({
+          call_id: r.call_id,
+          description: this.dshCallDescription(r),
+          started_at: Number(r.started_at),
+        });
+        continue;
+      }
+      // A catalog row has no call id; its detail is the raw event, which carries childId.
+      const label = this.dshCatalogFields(this.recordDetailText(r));
+      if (label) catalogs.set(label.childId, label.label);
+    }
+    return { calls, catalogs };
+  }
+
+  /**
+   * `arguments.description` of a DSH `subagent` call — the child's human label.
+   *
+   * Read from `tool_json.inputRaw`, NOT from `summary`: the summary is the normalizer's
+   * one-line truncation at 80 characters, and a review task's prompt blows past that — the
+   * JSON is cut mid-string and will not parse (measured: every one of the 5 calls here).
+   */
+  private dshCallDescription(row: any): string | undefined {
+    const tool = safeJson(row.tool_json);
+    if (typeof tool?.inputRaw === 'string') {
+      try {
+        const a = JSON.parse(tool.inputRaw);
+        if (typeof a?.description === 'string') return a.description;
+      } catch { /* fall through to the summary shape */ }
+    }
+    // A replayed capture may predate `tool_json`; the summary is all that is left, and it is
+    // only usable when the payload was short enough to survive truncation intact.
+    const s = String(row.summary ?? '');
+    const open = s.indexOf('('), close = s.lastIndexOf(')');
+    if (open <= 0 || close <= open) return undefined;
+    try {
+      const a = JSON.parse(s.slice(open + 1, close));
+      return typeof a?.description === 'string' ? a.description : undefined;
+    } catch { return undefined; }
+  }
+
+  /** A record's full detail text, whether it is inline or in a blob. */
+  private recordDetailText(row: any): string | undefined {
+    if (row?.detail_text) return row.detail_text;
+    if (row?.detail_blob) return this.readBlob(row.detail_blob);
+    return undefined;
+  }
+
+  private dshCatalogFields(detail: unknown): { childId: string; label: string } | undefined {
+    if (typeof detail !== 'string') return undefined;
+    try {
+      const d = JSON.parse(detail);
+      const childId = d?.childId ?? d?.child ?? d?.id;
+      if (typeof childId !== 'string') return undefined;
+      return { childId, label: typeof d.label === 'string' ? d.label : childId };
+    } catch { return undefined; }
+  }
+
+  /**
+   * The call that produced this child: SAME description, nearest in time.
+   *
+   * The description is what makes it safe; the timestamp only breaks ties, because the same
+   * review task can be re-spawned. Both keys are exact on this machine (5/5 labels
+   * identical, 24–38 ms apart), and neither alone would be: a label repeats, and a
+   * timestamp without a label would pair a child with an unrelated sibling spawn.
+   */
+  private pickSpawnCall(calls: any[], label: string, childCreatedAt: number, windowMs: number): any | undefined {
+    let best: any | undefined;
+    let bestDelta = Infinity;
+    for (const c of calls) {
+      if (c.description !== label) continue;
+      if (!Number.isFinite(c.started_at) || !Number.isFinite(childCreatedAt)) continue;
+      const delta = Math.abs(c.started_at - childCreatedAt);
+      if (delta <= windowMs && delta < bestDelta) { best = c; bestDelta = delta; }
+    }
+    return best;
+  }
+
+  /**
+   * The record in `sessionId` whose payload names `sessionIdOfChild` as a subagent.
+   *
+   * Codex has no `spawn_call_id`: the child's thread id appears in the spawn call's RESULT
+   * (`{"agent_id":"01a09624-…"}`), and only there. Scanning the parent's spawn-ish calls is
+   * bounded by how many such calls one conversation makes (208 `spawn_agent` records across
+   * all of this machine's codex sessions), so this stays a cheap per-session lookup and it
+   * is asked once per "返回父会话" click, not per row.
+   */
+  findSpawnRecordByChildId(source: SourceId, parentSessionId: string, childSessionId: string): string | undefined {
+    const rows = this.db.prepare(
+      `SELECT record_id, tool_json FROM records
+       WHERE source=? AND session_id=? AND tool_name IN ('spawn_agent','wait_agent','Agent','create_thread')
+         AND tool_json IS NOT NULL`,
+    ).all(source, parentSessionId) as any[];
+    for (const r of rows) {
+      const tool = safeJson(r.tool_json);
+      if (!tool) continue;
+      for (const text of [tool.inputRaw, tool.outputText]) {
+        if (typeof text !== 'string' || text.length === 0) continue;
+        if (!text.includes(childSessionId)) continue;   // cheap reject before parsing
+        let parsed: any;
+        try { parsed = JSON.parse(text); } catch { continue; }
+        if (mentionsId(parsed, childSessionId)) return r.record_id as string;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * A one-line title per session, taken from its FIRST real user message.
    *
    * `kind='user'` is the normalizer's verdict on human input, which is exactly the distinction
@@ -423,7 +727,10 @@ export class Store {
     const next = rows.find((r) => (r.kind === 'message' || r.kind === 'reasoning') && r.order_index > row.order_index);
     const bound = next ? next.order_index : Number.MAX_SAFE_INTEGER;
     return rows.filter((r) =>
-      (r.kind === 'tool' || r.kind === 'subtool')
+      // `subagent` is a CALL like the others (it keeps its arguments, result and duration),
+      // so an assistant row must still own it — listing only `tool` would silently drop the
+      // delegation out of the inspector's 工具调用 panel the moment it was reclassified.
+      (r.kind === 'tool' || r.kind === 'subtool' || r.kind === 'subagent')
       && r.record_id !== row.record_id
       && r.order_index >= row.order_index && r.order_index < bound);
   }
@@ -468,6 +775,25 @@ export class Store {
   }
 
   close() { try { this.db.close(); } catch { /* ignore */ } }
+}
+
+function safeJson(s: unknown): any {
+  if (typeof s !== 'string') return undefined;
+  try { return JSON.parse(s); } catch { return undefined; }
+}
+
+/** Whether `needle` appears as a complete string value anywhere in a parsed payload. */
+function mentionsId(v: unknown, needle: string, depth = 0): boolean {
+  if (depth > 8 || v == null) return false;
+  if (Array.isArray(v)) return v.some((x) => mentionsId(x, needle, depth + 1));
+  if (typeof v !== 'object') return false;
+  for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+    // `id`/`agent_id`/`thread_id`-style KEYS only: a payload can contain the child's id
+    // inside a summary or a diff by coincidence, and a link built on that would be fiction.
+    if (typeof val === 'string' && val === needle && /(^|_)(id|ids)$/i.test(k)) return true;
+    if (val && typeof val === 'object' && mentionsId(val, needle, depth + 1)) return true;
+  }
+  return false;
 }
 
 /**

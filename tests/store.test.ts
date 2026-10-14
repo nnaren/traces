@@ -269,3 +269,67 @@ describe('vault (copy-on-ingest raw archive)', () => {
     expect(await v.isTruncated({ ...REF, sessionId: 'trunc' })).toBe(true);
   });
 });
+
+/**
+ * The reverse half of the subagent link: from a child, find the parent's ROW.
+ *
+ * Both sources have to work, because they record the link differently — Claude stores the
+ * spawning call's id on the child, so the lookup is an indexed equality; Codex stores
+ * nothing, and the child's id only appears inside the parent's spawn result, so it has to be
+ * searched for. Getting this wrong does not throw: it returns null, and the UI silently
+ * reopens the parent at the top instead of on the call that explains the child's existence.
+ */
+describe('spawning record lookup (child → parent row)', () => {
+  const CLAUDE_PARENT = 'ccccccc-1111-7000-8000-000000000001';
+  const CLAUDE_CHILD = CLAUDE_PARENT + '--sub-ac5961e309227d752';
+  const CLAUDE_CALL = 'chatcmpl-tool-93249bc52a95581f';
+  const CODEX_PARENT = 'ddddddd-2222-7000-8000-000000000002';
+  const CODEX_CHILD = '01a09624-2596-73e3-bee8-d7258d9f2880';
+
+  const session = (o: Partial<any> & { sessionId: string; source: 'codex' | 'claude-code' }) => ({
+    capabilities: normalizeCodex({ source: 'codex', sessionId: o.sessionId, path: '/x' } as SessionRef, []).capabilities,
+    diagnostics: { badLineCount: 0 }, turns: [], steps: [], records: [], ...o,
+  } as any);
+
+  it('finds the parent call by id (claude), and lists the child for the same id', async () => {
+    const s = await Store.open(dir);
+    s.writeSession(session({
+      source: 'claude-code', sessionId: CLAUDE_PARENT,
+      records: [{
+        recordId: 'tool' + CLAUDE_CALL + '::1', kind: 'tool', orderIndex: 92.001, turnIndex: 0, stepIndex: 4,
+        text: 'Agent({...})', timeSeconds: null, toolName: 'Agent', callId: CLAUDE_CALL, flags: [],
+        tool: { callId: CLAUDE_CALL, name: 'Agent' },
+      }],
+    }), '/v/p', '/s/p');
+    s.writeSession(session({
+      source: 'claude-code', sessionId: CLAUDE_CHILD,
+      parentSessionId: CLAUDE_PARENT, agentNickname: 'ReviewTask-1', subagentDepth: 1, spawnCallId: CLAUDE_CALL,
+    }), '/v/c', '/s/c');
+
+    expect(s.findRecordByCallId('claude-code', CLAUDE_PARENT, CLAUDE_CALL)?.record_id)
+      .toBe('tool' + CLAUDE_CALL + '::1');
+    expect(s.childSessionsByCallId('claude-code', CLAUDE_CALL))
+      .toEqual([{ sessionId: CLAUDE_CHILD, agentNickname: 'ReviewTask-1' }]);
+    s.close();
+  });
+
+  it('finds the spawning call by the child id inside the payload (codex)', async () => {
+    const s = await Store.open(dir);
+    s.writeSession(session({
+      source: 'codex', sessionId: CODEX_PARENT,
+      records: [{
+        recordId: 'spawn-1', kind: 'tool', orderIndex: 10.001, turnIndex: 0, stepIndex: 2,
+        text: 'spawn_agent({...})', timeSeconds: null, toolName: 'spawn_agent', callId: 'call_a', flags: [],
+        tool: { callId: 'call_a', name: 'spawn_agent', outputText: JSON.stringify({ agent_id: CODEX_CHILD, nickname: 'Huygens' }) },
+      }],
+    }), '/v/p2', '/s/p2');
+    s.writeSession(session({
+      source: 'codex', sessionId: CODEX_CHILD, parentSessionId: CODEX_PARENT, agentNickname: 'Huygens',
+    }), '/v/c2', '/s/c2');
+
+    expect(s.findSpawnRecordByChildId('codex', CODEX_PARENT, CODEX_CHILD)).toBe('spawn-1');
+    // An id that merely APPEARS in some payload text is not a link.
+    expect(s.findSpawnRecordByChildId('codex', CODEX_PARENT, 'no-such-thread')).toBeUndefined();
+    s.close();
+  });
+});

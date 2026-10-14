@@ -57,20 +57,33 @@ export async function enumerateVault(vaultRoot: string, source: SourceId): Promi
     const damaged = size < 0 || (meta.byteSize > 0 && size !== meta.byteSize);
     if (damaged) continue; // never normalize a payload we cannot fully account for
 
-    // Source-specific identity — codex `parentSessionId` / `agentNickname` / `subagentDepth`
-    // — is recoverable ONLY from the copy's first line; `meta.json` never stored it.
+    // Source-specific identity — codex `parentSessionId` / `agentNickname` / `subagentDepth`,
+    // claude `spawnCallId` — is recoverable ONLY from the copy's first line (codex) or from
+    // the ORIGINAL path's layout (claude's `subagents/agent-<id>.meta.json`, which this
+    // capture does not contain); `meta.json` only started storing it after a replay was
+    // found to erase the whole subagent tree.
     // Replaying without this step erased the whole subagent tree in one rebuild
     // (177 of 414 codex sessions lost their parent), and because the fields are absent
     // rather than wrong, nothing downstream reported it. The format owner derives them,
     // so ask it rather than re-implementing its header shape here.
     // `meta.sourcePath` is passed through: a vault copy's own path cannot carry identity that
-    // lived in the original directory name (Claude's project slug).
+    // lived in the original directory name (Claude's project slug, or the subagents folder).
     const header = base.readRef
       ? await base.readRef(dataPath, meta.sourcePath).catch(() => undefined) : undefined;
+
+    // What the header could not recover is filled from meta. `header` wins where it exists:
+    // it comes from the bytes themselves, meta from whatever the capture recorded.
+    const identity = {
+      parentSessionId: header?.parentSessionId ?? meta.parentSessionId,
+      agentNickname: header?.agentNickname ?? meta.agentNickname,
+      subagentDepth: header?.subagentDepth ?? meta.subagentDepth,
+      spawnCallId: header?.spawnCallId ?? meta.spawnCallId,
+    };
 
     out.push({
       ref: {
         ...header,
+        ...identity,
         source,
         sessionId,
         // Vault-specific fields win: this ref points at the CAPTURE, not the origin.

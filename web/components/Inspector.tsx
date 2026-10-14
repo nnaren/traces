@@ -18,7 +18,7 @@ import { subagentRefs } from '../lib/subagent';
 
 const KIND_LABEL: Record<string, string> = {
   system: '系统', user: '用户', context: '上下文', compacted: '压缩',
-  message: '助手', reasoning: '推理', tool: '工具', subtool: '子工具',
+  message: '助手', reasoning: '推理', tool: '工具', subtool: '子工具', subagent: '子代理',
   'request-header': '请求头', 'turn-end': '轮次结束', 'session-end': '会话结束',
 };
 
@@ -74,7 +74,10 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
 
   const timing = useMemo(() => computeTiming(rec, step), [rec, step]);
   const tools = rec?.siblings ?? [];
-  const isTool = rec?.kind === 'tool' || rec?.kind === 'subtool';
+  // A subagent call IS a tool-shaped record (arguments, result, duration) — only its kind
+// differs — so it gets the tool-shaped tabs and the subagent jump link. Gating on 'tool'
+// alone silently hid both the moment the kind was introduced.
+const isTool = rec?.kind === 'tool' || rec?.kind === 'subtool' || rec?.kind === 'subagent';
   const isHook = rec?.kind === 'hook';
   const turnId = turn?.source_turn_id;
   const stepId = step?.source_step_id;
@@ -273,20 +276,23 @@ export function Inspector({ session, recordId, onSelect, width, hasSession, onOp
 /**
  * Jump links from a tool call to the subagent conversation it drove.
  *
- * A Codex subagent is a session of its own, so the `agent_id` in `spawn_agent`'s result (or
- * in `wait_agent`'s `targets`) opens directly. Links are only rendered for ids that resolve
- * to a session we actually hold — a dead link is worse than no link, and an unresolved id
- * usually means the child rollout has not been ingested yet.
+ * Two ways in, merged here: Codex puts the child's thread id in the payload, and the record
+ * detail response carries the children the SERVER resolved from its own spawn column
+ * (Claude Code's `Agent` call). Links are rendered for ids that resolve — a dead link is
+ * worse than no link — except for server-resolved ones, which came out of the store and
+ * cannot be missing; those open through the same fallback fetch the jump uses.
  */
 function SubagentLinks({ rec, hasSession, onOpenSession }: {
   rec: RecordRow; hasSession?: (id: string) => boolean; onOpenSession?: (id: string) => void;
 }) {
   if (!onOpenSession) return null;
-  const refs = subagentRefs(rec).filter((r) => (hasSession ? hasSession(r.id) : true));
-  if (refs.length === 0) return null;
+  const refs = subagentRefs(rec, rec.subagents);
+  const known = new Set((rec.subagents ?? []).map((c) => c.sessionId));
+  const usable = refs.filter((r) => known.has(r.id) || (hasSession ? hasSession(r.id) : true));
+  if (usable.length === 0) return null;
   return (
     <div className="sub-jump">
-      {refs.map((r) => (
+      {usable.map((r) => (
         <button key={r.id} type="button" className="sub-jump-btn" title={'打开子 agent 会话 ' + r.id}
           onClick={() => onOpenSession(r.id)}>
           <span className="sub-jump-ico">↗</span>

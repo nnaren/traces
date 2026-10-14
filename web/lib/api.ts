@@ -1,5 +1,13 @@
 export type SourceId = 'codex' | 'claude-code' | 'dsh';
 
+/** A subagent session that a specific tool call spawned. */
+export interface SubagentChild {
+  sessionId: string;
+  /** The spawning call's id (Claude Code). Codex carries the child id in the payload. */
+  spawnCallId?: string | null;
+  agentNickname?: string | null;
+}
+
 export interface Capabilities {
   reasoning: 'plaintext' | 'encrypted' | 'absent';
   usageGranularity: string;
@@ -15,6 +23,11 @@ export interface SessionRow {
   /** First real user message — the card's one-line subject. */
   title?: string | null;
   parentSessionId?: string | null; agentNickname?: string | null; subagentDepth?: number | null;
+  /**
+   * The parent tool call that spawned this session (Claude Code). Codex leaves it null: the
+   * child's thread id is in the parent's tool payload, so no extra key is needed there.
+   */
+  spawnCallId?: string | null;
   startedAt?: number; endedAt?: number;
   capabilities: Capabilities;
   diagnostics: Record<string, any>;
@@ -41,6 +54,11 @@ export interface RecordRow {
   toolName?: string; callId?: string; isError: boolean;
   tool?: ToolCall;
   hook?: HookInjection;
+  /**
+   * Subagent conversations this call spawned, resolved server-side. Present on the record
+   * DETAIL response only (the ledger list does not carry it).
+   */
+  subagents?: SubagentChild[];
   usage: any; flags: string[]; summary: string; detail?: string | null;
   hasDetailBlob?: boolean;
 }
@@ -86,6 +104,33 @@ export interface SiblingTool {
   outputText?: string;
 }
 
+/** A subagent session spawned by one conversation — one row of the header's menu. */
+export interface SubagentSummary {
+  source: SourceId; sessionId: string;
+  /** The spawn label (codex nickname / DSH catalog label / Claude description). */
+  agentNickname?: string | null;
+  /** First real user message of the child — its delegation prompt. */
+  title?: string | null;
+  depth?: number | null;
+  /** Subagents this child spawned itself; codex nests to depth 4. */
+  childCount: number;
+  startedAt?: number; endedAt?: number;
+  recordCount: number; turnCount: number; stepCount: number;
+  /** Sum of the session's usage, or null when the source logged none (claude-code). */
+  tokens: number | null;
+}
+
+/**
+ * Where a subagent was spawned from, and the parent's ledger row that spawned it.
+ */
+export interface SessionOrigin {
+  parentSessionId: string;
+  /** Claude Code only: the `Agent` call's id. Codex's spawn call carries no id of its own. */
+  spawnCallId: string | null;
+  /** The parent's record id, so the ledger can position on the spawning call. */
+  spawnRecordId: string | null;
+}
+
 const base = '';
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(base + url);
@@ -122,7 +167,7 @@ export const api = {
   sessions: (source?: SourceId) =>
     get<SessionRow[]>('/api/sessions?limit=400' + (source ? '&source=' + source : '')),
   session: (source: SourceId, id: string) =>
-    get<{ session: SessionRow; turns: TurnRow[]; steps: StepRow[] }>(
+    get<{ session: SessionRow; turns: TurnRow[]; steps: StepRow[]; origin?: SessionOrigin | null }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}`),
   records: (source: SourceId, id: string, before?: number, limit = 200) =>
     get<{ records: RecordRow[]; hasMore: boolean; nextBefore: number | null; nextAfter: number | null }>(
@@ -137,6 +182,16 @@ export const api = {
   messages: (source: SourceId, id: string, limit = 200) =>
     get<{ messages: Array<{ recordId: string; orderIndex: number; text: string }> }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}/messages?limit=${limit}`),
+  /**
+   * The subagents this session spawned — the header's menu.
+   *
+   * Resolved by the server, not filtered out of `sessions()`: that list is capped and
+   * time-ordered, so a child outside the window would otherwise be missing from a menu that
+   * correctly counts it.
+   */
+  subagents: (source: SourceId, id: string) =>
+    get<{ subagents: SubagentSummary[] }>(
+      `/api/sessions/${source}/${encodeURIComponent(id)}/subagents`),
   record: (source: SourceId, id: string, rid: string) =>
     get<RecordRow & { siblings: SiblingTool[] }>(
       `/api/sessions/${source}/${encodeURIComponent(id)}/records/${encodeURIComponent(rid)}`),

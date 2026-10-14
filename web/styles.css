@@ -8,11 +8,21 @@
   --fg:#e6edf3; --fg2:#8b949e; --fg3:#6e7681;
   --accent:#58a6ff; --codex:#7ee787; --claude:#d2a8ff; --dsh:#ffa657;
   --err:#f85149; --warn:#d29922;
+  /* "已完成" green for the subagent menu's status dot. Its own token rather than a reuse of
+     the source colours: none of those mean "this finished", and tying a status to a source
+     would make a codex run and a dsh run look like different outcomes. */
+  --ok:#3fb950;
   --on-accent:#04121f;
   --lane-user:#58a6ff; --lane-context:#3fb950; --lane-model:#a371f7; --lane-tool:#d29922;
   /* 推理 badge. Kept as its own token (not --lane-model) so the badge can be tuned
      without dragging the timeline's model lane along with it. */
   --reasoning:#22d3ee;
+  /* 子代理 = delegation (spawn / wait / message / close a subagent).
+     Teal, chosen for MAXIMUM distance from the two colours it must never be confused with:
+     the tool amber beside it in the same lane, and the error red a failed call turns
+     bright red. Magenta was tried first and sat far too close to --err on a dense strip.
+     Teal is still clear of 推理's cyan, and light-mode uses a deeper teal for contrast. */
+  --subagent:#2dd4bf;
   --edge-turn:#3fb950; --edge-turn-end:#1f6f43; --edge-step:#8957e5; --edge-step-end:#5a3b91;
   --jt-key:#ff7b72; --jt-str:#a5d6ff; --jt-num:#79c0ff; --jt-bool:#d2a8ff;
   --tip-bg:#1c2128; --tip-fg:#e6edf3;
@@ -24,9 +34,11 @@
   --fg:#1f2328; --fg2:#59636e; --fg3:#818b98;
   --accent:#0969da; --codex:#1a7f37; --claude:#8250df; --dsh:#bc4c00;
   --err:#cf222e; --warn:#9a6700;
+  --ok:#1a7f37;
   --on-accent:#ffffff;
   --lane-user:#0969da; --lane-context:#1a7f37; --lane-model:#8250df; --lane-tool:#9a6700;
   --reasoning:#0e7490;
+  --subagent:#0f766e;
   --edge-turn:#1a7f37; --edge-turn-end:#4ac26b; --edge-step:#8250df; --edge-step-end:#a371f7;
   --jt-key:#cf222e; --jt-str:#0a3069; --jt-num:#0550ae; --jt-bool:#8250df;
   --tip-bg:#24292f; --tip-fg:#ffffff;
@@ -39,9 +51,11 @@
     --fg:#1f2328; --fg2:#59636e; --fg3:#818b98;
     --accent:#0969da; --codex:#1a7f37; --claude:#8250df; --dsh:#bc4c00;
     --err:#cf222e; --warn:#9a6700;
+  --ok:#1a7f37;
     --on-accent:#ffffff;
     --lane-user:#0969da; --lane-context:#1a7f37; --lane-model:#8250df; --lane-tool:#9a6700;
     --reasoning:#0e7490;
+    --subagent:#0f766e;
     --edge-turn:#1a7f37; --edge-turn-end:#4ac26b; --edge-step:#8250df; --edge-step-end:#a371f7;
     --jt-key:#cf222e; --jt-str:#0a3069; --jt-num:#0550ae; --jt-bool:#8250df;
     --tip-bg:#24292f; --tip-fg:#ffffff;
@@ -215,8 +229,90 @@ code,pre,.mono{font-family:var(--mono)}
 
 .session-head{padding:12px 18px;border-bottom:1px solid var(--line);background:var(--bg2)}
 .head-main{display:flex;align-items:center;gap:10px}
-.head-main h2{font-size:14px;margin:0;font-family:var(--mono);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The title is now the session's FIRST MESSAGE — prose, not an id — so it takes the UI
+   font and the weight of a heading rather than of a fingerprint. It still truncates to one
+   line: the longest measured first message is 7457 characters. `flex:1 1 auto` + min-width:0
+   is what makes the ellipsis work inside the flex row, so a long title shrinks and leaves
+   the subagent menu its place instead of pushing it off the header. */
+.head-main h2{font-size:14px;margin:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;flex:1 1 auto;min-width:0}
 .head-meta{display:flex;gap:10px;color:var(--fg3);font-size:11px;margin-top:6px;font-family:var(--mono);overflow:hidden;white-space:nowrap}
+/* The session id as a property: a badge like the CLI version, clipped when it is long. It
+   is the thing you copy out of here, so it stays selectable text — not a button. */
+.h-sid{background:var(--bg3);border:1px solid var(--line);border-radius:4px;padding:1px 6px;
+  font-size:10px;color:var(--fg2);overflow:hidden;text-overflow:ellipsis;min-width:0;max-width:46%}
+/* ---------- header: 标题紧接【子智能体下拉框】 ---------- */
+/* One unit, on BOTH kinds of page. A control pinned to the far end of a 1500px row reads as
+   unrelated to the title: the eye has to cross the whole width to connect "this conversation"
+   with "what it spawned", and the connection is the entire point of the control. So the menu
+   follows the title at a fixed 9px instead — on a subagent's page after a slash, on a
+   conversation's page directly. */
+.head-pair{display:flex;align-items:center;gap:9px;min-width:0;flex:0 1 auto}
+/* Inside the pair the menu is part of the phrase, not a right-aligned control: the auto
+   margin that would push it to the row's end is what tore the two apart in the first place. */
+.head-pair .submenu{margin-left:0}
+/* A conversation's title gets the same viewport cap the parent's has, so a long one ellipsizes
+   predictably rather than pushing the menu off the header. */
+.head-pair > h2{max-width:min(720px,52vw)}
+/* The parent's title is a LINK to another conversation, so it reads as one — dimmed, because
+   the subagent actually open is named by the switcher beside it, and that control carries the
+   louder type. The cap lives on the CONTAINER, never on the button inside it: a percentage
+   max-width on an inner element resolves against a content-sized flex box, so a long title
+   clamped the button to a fraction of a box sized for the WHOLE title, and the leftover width
+   showed up as dead space between the slash and the menu. */
+.crumb{display:flex;align-items:center;gap:6px;min-width:0;flex:0 1 auto;max-width:min(640px,45vw)}
+.crumb-p{background:none;border:0;padding:0;margin:0;cursor:pointer;font:inherit;font-size:14px;
+  color:var(--fg3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto;
+  min-width:0;text-align:left}
+.crumb-p:hover{color:var(--accent);text-decoration:underline}
+.crumb-p:focus-visible{outline:1px solid var(--accent);outline-offset:2px;border-radius:2px}
+.crumb-sep{color:var(--fg3);flex:0 0 auto}
+/* ---------- header subagent menu ---------- */
+/* Pushed to the header's right edge by an auto margin, like the card timestamp: the row's
+   child count varies (only sessions that spawned subagents carry the menu), so
+   space-between would centre whatever is in the middle. */
+.submenu{position:relative;margin-left:auto;flex:0 0 auto}
+.submenu-btn{display:inline-flex;align-items:center;gap:6px;max-width:420px;
+  background:var(--bg3);border:1px solid var(--line);border-radius:6px;padding:4px 9px;
+  color:var(--fg2);font-size:11px;cursor:pointer}
+.submenu-btn:hover{color:var(--fg);border-color:var(--fg3)}
+.submenu-btn.on{color:var(--fg);border-color:var(--accent)}
+/* The menu's own request failed. It stays VISIBLE rather than disappearing — a missing
+   control reads as "this session has no subagents", which is a different and wrong fact. */
+.submenu-btn.bad{color:var(--warn);border-color:var(--warn);cursor:not-allowed}
+.submenu-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.submenu-caret{font-size:9px;opacity:.7}
+/* Absolutely positioned so opening the menu never reflows the header — the timeline sits
+   directly below it and would otherwise jump down and back up. */
+.submenu-pop{position:absolute;z-index:60;top:calc(100% + 4px);width:430px;
+  max-width:min(430px,80vw);max-height:340px;overflow:auto;padding:5px;
+  background:var(--bg2);border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 10px 30px rgba(0,0,0,.4)}
+/* Which edge it grows from, decided by measuring the button (see `SubagentMenu`). The button
+   follows the title near the left of the header, so growing rightwards is the normal case;
+   right-anchoring it instead ran the panel off the left edge, where `.main`'s
+   `overflow:hidden` silently cut the labels in half. */
+.submenu-pop.align-left{left:0}
+.submenu-pop.align-right{right:0}
+.submenu-empty{font-size:11px;color:var(--fg3);padding:8px 9px}
+.sub-row{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+  background:none;border:0;border-radius:6px;padding:6px 7px;cursor:pointer;color:inherit;font:inherit}
+/* A <button> is the row rather than a div with a click handler: the whole menu is then
+   reachable by Tab, and Enter/Space activate it without any key handling of our own. */
+.sub-row:hover{background:var(--bg3)}
+.sub-row.on{background:color-mix(in srgb,var(--accent) 16%,transparent)}
+/* Status, not decoration: filled = the source wrote an end timestamp, hollow = it did not.
+   Deliberately not an animated "running" dot — that would claim a liveness the store cannot
+   verify (18 codex subagents here simply have no ended_at). */
+.sub-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:transparent;
+  box-shadow:inset 0 0 0 1px var(--fg3)}
+.sub-dot.done{background:var(--ok);box-shadow:none}
+.sub-main{flex:1 1 auto;min-width:0}
+.sub-label{display:block;font-size:12px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-meta{display:block;font-size:10px;color:var(--fg3);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sub-nums{flex:0 0 auto;text-align:right;font-family:var(--mono);font-size:10px;line-height:1.4;color:var(--fg3)}
+.sub-tok{display:block;color:var(--fg2)}
+.sub-go{flex:0 0 auto;color:var(--fg3);font-size:13px}
 .badge{background:var(--bg3);border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:10px;color:var(--fg2)}
 .badge.err{color:var(--err);border-color:var(--err)}
 .caps{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}
@@ -269,6 +365,9 @@ code,pre,.mono{font-family:var(--mono)}
 .tl-span[data-lane='0'][data-kind='hook']{--bar:var(--lane-context);opacity:.55}
 .tl-span[data-lane='2'][data-kind='tool'],
 .tl-span[data-lane='2'][data-kind='subtool']{--bar:var(--warn)}
+/* Subagent work shares the 工具 lane but is drawn in the delegation hue, so the strip shows
+   at a glance how much of the trajectory was handed to other agents. */
+.tl-span[data-lane='2'][data-kind='subagent']{--bar:var(--subagent)}
 /* No recorded end time → start marker only. Never a fabricated width. */
 .tl-span.start{min-width:3px;border-radius:2px;background:transparent;border:1px dashed var(--bar);opacity:.9}
 .tl-span.err{background:var(--err);border-color:var(--err);opacity:1}
@@ -302,6 +401,7 @@ code,pre,.mono{font-family:var(--mono)}
 .sw.context{background:var(--lane-context);border-color:var(--lane-context)}
 .sw.model{background:var(--lane-model);border-color:var(--lane-model)}
 .sw.tool{background:var(--warn);border-color:var(--warn)}
+.sw.subagent{background:var(--subagent);border-color:var(--subagent)}
 .sw.reasoning{background:var(--reasoning);border-color:var(--reasoning)}
 /* Hook shares the 输入 lane colour with 上下文 and is told apart the same way the strip
    tells them apart — by opacity. The swatch must mirror `.tl-span[data-kind='hook']`
@@ -360,6 +460,10 @@ code,pre,.mono{font-family:var(--mono)}
 .kind.reasoning{color:var(--reasoning);background:color-mix(in srgb,var(--reasoning) 15%,transparent)}
 .kind.tool{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
 .kind.subtool{color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,transparent)}
+/* 子代理 = the model handed this to ANOTHER agent. Magenta, kept off the tool amber: it is a
+   delegation decision, not command execution, and in a delegation-heavy trajectory (codex
+   logs 1675 wait_agent calls on this machine) the two must not blur into one stream. */
+.kind.subagent{color:var(--subagent);background:color-mix(in srgb,var(--subagent) 16%,transparent)}
 /* Hook: an external rule speaking to the model. Distinct from 用户输入 — the user did not
    write this, and the trajectory only ever shows its text, never its execution. */
 .kind.hook{color:var(--lane-context);background:color-mix(in srgb,var(--lane-context) 22%,transparent)}

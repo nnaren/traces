@@ -65,7 +65,6 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
   const [loadingAll, setLoadingAll] = useState(false);
   const [pendingTail, setPendingTail] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
-  const loadedFor = useRef<string>('');
   /**
    * Which session's FIRST page has finished loading. The jump effect refuses to run until
    * this equals `key`.
@@ -79,26 +78,38 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
   const [readyKey, setReadyKey] = useState('');
 
   const key = session.source + ':' + session.sessionId;
+  /** The current session key, readable from a settling promise without re-creating on change. */
+  const keyRef = useRef(key);
+  keyRef.current = key;
 
   useEffect(() => {
-    if (loadedFor.current === key) return;
-    loadedFor.current = key;
+    // Reload whenever the SESSION changes. An earlier revision latched on a ref and only ever
+    // loaded a given session once per mount, so navigating A → B → A left the ledger showing
+    // B's records (and `readyKey`) under A's header — rows from the wrong trajectory, and the
+    // jump effect's `readyKey === key` guard then blocked every jump to A forever. React only
+    // runs this effect when its deps change, so the session-switched case is the only one that
+    // reaches here in the first place; a re-render with the same key does not re-fetch.
     setRecords([]); setHasMore(false); setCursor(undefined); setAtEnd(false);
     setBounds({ turns: [], steps: [] });
     setScrollTop(0);
     setPendingTail(false);
+    const requestedKey = key;
     // Turns/steps carry the SOURCE turn/step numbers, which the separators display.
     api.session(session.source, session.sessionId)
-      .then((s) => setBounds({ turns: s.turns ?? [], steps: s.steps ?? [] }))
+      .then((s) => { if (keyRef.current === requestedKey) setBounds({ turns: s.turns ?? [], steps: s.steps ?? [] }); })
       .catch(() => {});
     // Head-first: no cursor means the OLDEST records, so the list opens at the top.
     api.recordsAfter(session.source, session.sessionId, undefined, PAGE)
       .then((r) => {
+        // A reply for a session the user has already navigated away from is dropped WHOLE,
+        // not just for readiness: letting it through would paint the previous session's rows
+        // under the current session's header. `keyRef` is read at settle time rather than
+        // captured, so whichever reply arrives last still wins only if it is the current one.
+        if (keyRef.current !== requestedKey) return;
         setRecords(r.records); setHasMore(r.hasMore); setCursor(r.nextAfter ?? undefined);
-        // Publish readiness only for the session that actually landed.
-        setReadyKey((prev) => (prev === key ? prev : key));
+        setReadyKey(requestedKey);
       })
-      .catch(() => setReadyKey((prev) => (prev === key ? prev : key)));
+      .catch(() => { if (keyRef.current === requestedKey) setReadyKey(requestedKey); });
   }, [key, session.source, session.sessionId]);
 
   /** Append the next page below the loaded slice. */
@@ -247,6 +258,9 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
       // Land it a little above centre so the rows above it give context.
       // Sum the heights rather than multiplying, so this keeps working if rows ever vary.
       const target = Math.max(0, offsetOf(built, idx) - viewport / 3);
+      // Claim the next head-reset: the effect below would otherwise pull the list back to
+      // order 0 on the render triggered by this very state change.
+      jumpedRef.current = true;
       setScrollTop(target);
       const el = boxRef.current;
       if (el) el.scrollTop = target;
@@ -263,9 +277,14 @@ export function Ledger({ session, selected, onSelect, jumpTo, onJumpDone, inspec
 
   // Open at the head: the browser restores a previous scroll offset when the same element
   // is reused across sessions, and this list must always start at the session's first record.
+  const jumpedRef = useRef(false);
   useEffect(() => {
     const el = boxRef.current;
     if (!el || !records.length) return;
+    // A jump positions the list itself; resetting to the head here would undo it on the very
+    // render that follows (the jump writes the DOM directly, then the `scrollTop` state it
+    // set arrives one render later). Skip exactly once.
+    if (jumpedRef.current) { jumpedRef.current = false; return; }
     if (scrollTop > 0) return; // the user has moved; never yank them back
     el.scrollTop = 0;
   }, [records.length, scrollTop]);
@@ -415,7 +434,9 @@ function Row({ row, active, onSelect }: { row: RowModel; active: boolean; onSele
   }
 
   const r = row.record!;
-  const isTool = r.kind === 'tool' || r.kind === 'subtool';
+  // `subagent` renders like a tool row (name + picked-out arguments) — it carries the same
+  // call shape, only a different kind and colour.
+  const isTool = r.kind === 'tool' || r.kind === 'subtool' || r.kind === 'subagent';
   // DSH draws a tool row as `bash {"command":…}` — name in the row's own colour, the
   // JSON object picked out in the tool colour. Rendering the raw `bash({…})` makes the
   // arguments read as part of a call expression instead of as data.
@@ -457,6 +478,7 @@ function kindLabel(k: string): string {
     case 'reasoning': return '推理';
     case 'tool': return '工具';
     case 'subtool': return '子工具';
+    case 'subagent': return '子代理';
     case 'hook': return '钩子';
     case 'request-header': return '请求头';
     case 'turn-end': return '轮次结束';
@@ -474,6 +496,7 @@ function kindTitle(k: string): string {
     reasoning: '推理内容（模型的思考过程，Codex 中与助手消息分离记录）',
     tool: '工具处理',
     subtool: '子工具处理（嵌套调用）',
+    subagent: '子代理调用：派生 / 等待 / 消息 / 关闭 / 打断一个子代理会话（Codex 另有子代理结果回注的 <subagent_notification> 记录）',
     hook: '钩子注入（生命周期钩子向对话写入的文本；钩子脚本自身的执行不在轨迹中）',
     'request-header': '请求头',
     'turn-end': '轮次结束标记',
