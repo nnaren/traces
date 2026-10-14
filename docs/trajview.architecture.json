@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "trajview 轨迹观察台",
+    "subtitle": "三源只读摄入 · 归档重放 · 归一化落库 · 账本/时间线/详情",
+    "output": "trajview-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-path",
+        "label": "主链路",
+        "focus": [
+          "codex",
+          "claude",
+          "dsh",
+          "adapters",
+          "norm",
+          "store",
+          "api",
+          "web"
+        ],
+        "note": "从三家 CLI 的本地日志到浏览器的一条直线。"
+      },
+      {
+        "id": "vault-replay",
+        "label": "归档与重放",
+        "focus": [
+          "adapters",
+          "vault",
+          "norm"
+        ],
+        "note": "来源日志会被轮转删除，vault 是可重建派生层的唯一依据。"
+      },
+      {
+        "id": "derived-only",
+        "label": "派生层",
+        "focus": [
+          "adapters",
+          "norm",
+          "store",
+          "api",
+          "web"
+        ],
+        "note": "除 vault 外的一切都可随时删库重建。"
+      }
+    ]
+  },
+  "layout": {
+    "mode": "grid",
+    "cols": 6,
+    "cellW": 168,
+    "cellH": 108,
+    "gapX": 26,
+    "gapY": 22
+  },
+  "components": [
+    {
+      "id": "codex",
+      "type": "external",
+      "label": "Codex rollouts",
+      "sublabel": "~/.codex/sessions",
+      "row": 0,
+      "col": 0
+    },
+    {
+      "id": "claude",
+      "type": "external",
+      "label": "Claude Code JSONL",
+      "sublabel": "~/.claude/projects/<slug>",
+      "row": 0,
+      "col": 2
+    },
+    {
+      "id": "dsh",
+      "type": "external",
+      "label": "DSH session log",
+      "sublabel": "~/.dsh",
+      "row": 0,
+      "col": 4
+    },
+    {
+      "id": "adapters",
+      "type": "backend",
+      "label": "源适配器",
+      "sublabel": "SessionRef + 行读取",
+      "tag": "只读",
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "vault",
+      "type": "database",
+      "label": "Vault 归档",
+      "sublabel": "data/vault/<源>/<id>",
+      "tag": "字节副本",
+      "row": 2,
+      "col": 0
+    },
+    {
+      "id": "norm",
+      "type": "backend",
+      "label": "归一化器",
+      "sublabel": "records / turns / steps",
+      "row": 2,
+      "col": 4
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "SQLite 派生库",
+      "sublabel": "sessions · records · FTS",
+      "tag": "可重建",
+      "row": 3,
+      "col": 2
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "HTTP 服务",
+      "sublabel": "trajview :5178",
+      "row": 4,
+      "col": 2
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "浏览器界面",
+      "sublabel": "账本 · 时间线 · 详情",
+      "row": 5,
+      "col": 2
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "来源侧（全程只读）",
+      "wraps": [
+        "codex",
+        "claude",
+        "dsh"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "trajview 派生层（可整体删除后从 vault 重建）",
+      "wraps": [
+        "adapters",
+        "vault",
+        "norm",
+        "store",
+        "api",
+        "web"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "codex-in",
+      "from": "codex",
+      "to": "adapters",
+      "label": "发现会话",
+      "variant": "default"
+    },
+    {
+      "id": "claude-in",
+      "from": "claude",
+      "to": "adapters",
+      "label": "发现会话",
+      "labelDy": 24
+    },
+    {
+      "id": "dsh-in",
+      "from": "dsh",
+      "to": "adapters",
+      "label": "发现会话"
+    },
+    {
+      "id": "capture",
+      "from": "adapters",
+      "to": "vault",
+      "label": "摄入时字节归档",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "top"
+    },
+    {
+      "id": "replay",
+      "from": "vault",
+      "to": "adapters",
+      "label": "--from-vault 重放",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "normalize",
+      "from": "adapters",
+      "to": "norm",
+      "label": "逐源解析",
+      "variant": "emphasis"
+    },
+    {
+      "id": "persist",
+      "from": "norm",
+      "to": "store",
+      "label": "整会话事务写入"
+    },
+    {
+      "id": "serve",
+      "from": "store",
+      "to": "api",
+      "label": "分页 / 计数 / FTS",
+      "labelDy": 24
+    },
+    {
+      "id": "render",
+      "from": "api",
+      "to": "web",
+      "label": "REST",
+      "variant": "emphasis",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "来源",
+      "items": [
+        "三家 CLI 的本地日志，适配器全程只读",
+        "vault 之外的任何环节都不写回来源"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "派生",
+      "items": [
+        "逐源归一化后写入单库，可整库删除重建",
+        "记录级 flag 保留保真信息，如参数缺失、钩子注入"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "归档",
+      "items": [
+        "vault 保存原始字节与来源路径",
+        "来源被轮转删除后，重建只依赖它"
+      ]
+    }
+  ]
+}
